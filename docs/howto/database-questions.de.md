@@ -1,17 +1,18 @@
 ---
-source_sha: "351588808d86"
+source_sha: "4127fd6b43f9"
 title: "Fragen aus Ihrer Datenbank beantworten"
 description: "Verbinden Sie einen selbst gehosteten Postgres-MCP-Server hinter einer reinen Leserolle und einem reinen View-Schema, und lassen Sie einen Agent ihn abfragen."
 ---
 
 # Fragen aus Ihrer Datenbank beantworten { #answer-questions-from-your-database }
 
-Verbinden Sie einen Postgres-MCP-Server, damit ein Agent Fragen aus Ihrer eigenen Datenbank beantworten kann, und schieben Sie vorher eine reine Leserolle und ein reines View-Schema zwischen den Agent und Ihre Tabellen. Dies ist eine Anleitung zum Durchführen, kein Bericht über ein gemessenes Deployment: Der MCP-Server, den dieses Rezept braucht, ist von dieser Installation aus nicht erreichbar, aus einem unten erklärten Grund, sodass hier nichts end-to-end gegen einen laufenden Agent ausgeführt wurde.
+Verbinden Sie einen Postgres-MCP-Server, damit ein Agent Fragen aus Ihrer eigenen Datenbank beantworten kann, und schieben Sie vorher eine reine Leserolle und ein reines View-Schema zwischen den Agent und Ihre Tabellen. Dies ist eine Anleitung zum Durchführen, kein Bericht über ein gemessenes Deployment: Hier wurde nichts end-to-end gegen einen laufenden Agent ausgeführt.
 
 ## Was Sie brauchen { #what-you-need }
 
 - Eine [laufende Installation](../install.md) mit einem Modellprofil.
 - Ein selbst betriebener Postgres-MCP-Server, erreichbar unter einer URL, die dieses Deployment anwählen kann. Der Eintrag `postgres` im Katalog ist genau das: keine gehostete URL, ein Bearer-Token, das *Ihr eigener Server* prüft, und eine Warnung, ihn auf reine Leseansichten statt auf eine Primärdatenbank mit Schreibzugriff zu richten. Siehe [den Katalog](../mcp.md#data-and-analytics).
+- Für einen Server im eigenen Netz dieses Deployments - einen compose-Dienst, eine private Adresse - sein Host in [`MCP_ALLOWED_HOSTS`](../configuration.md#project-settings). Siehe [unten](#let-the-deployment-reach-a-server-on-its-own-network).
 - `connections:manage`, um die Organisationsverbindung zu registrieren.
 
 ## Warum eine reine Leserolle und ein reines View-Schema { #why-a-read-only-role-and-a-views-only-schema }
@@ -74,16 +75,9 @@ REVOKE ALL ON SCHEMA public FROM shop_readonly;
 
 Die Referenzantwort, damit Sie eine Antwort mit den Quellzeilen abgleichen können: `status_counts` ergibt paid 6 Bestellungen / 26700 Cent, pending 1 / 2500, refunded 1 / 4200. Fragt `shop_readonly` direkt `orders` ab, wird das mit `permission denied for table orders` abgelehnt - die Views sind die einzige Tür.
 
-## Den Server verbinden { #connect-the-server }
+## Das Deployment einen Server im eigenen Netz erreichen lassen { #let-the-deployment-reach-a-server-on-its-own-network }
 
-1. Wählen Sie unter **Toolbox → MCP servers** eines Agents **Connect a server** und wählen Sie **PostgreSQL** aus dem Katalog, oder verbinden Sie ihn einmal unter **MCP servers** in den Organisationseinstellungen, damit mehr als ein Agent ihn binden kann.
-2. Richten Sie die Verbindung auf Ihren eigenen laufenden Postgres-MCP-Server (zum Beispiel [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp)), konfiguriert mit dem Connection-String von `shop_readonly` und seinem eingeschränkten, reinen Lesemodus. Fügen Sie das Bearer-Token ein, das dieser Server prüft - nicht das Datenbankpasswort - als Token der Verbindung.
-3. Schränken Sie in der Bindung des Agents `allowed_tools` auf die reinen Lese-Tools ein, die der Server anbietet, zusätzlich zu dem, was die Verbindung selbst bereits erlaubt.
-4. Binden Sie nur diese Verbindung, setzen Sie ein Budget, und setzen Sie Instruktionen, die die beiden Views nennen und dem Agent sagen, dass er sagen soll, wenn eine Frage eine Spalte oder eine Tabelle braucht, die die Views nicht führen, statt zu raten.
-
-## Warum das hier nicht durchgeführt werden konnte { #why-this-could-not-be-run-here }
-
-Das Verbinden des Servers wurde gegen diese Installation versucht und abgelehnt:
+Die URL einer MCP-Verbindung wird beim Speichern abgelehnt, wenn ihr Host auf eine Loopback-, private, Link-Local- oder Shared-CGNAT-Adresse auflöst. Siehe [eine URL, die dieses Deployment nicht erreichen darf, wird abgelehnt](../mcp.md#a-connection). Einen Server unter `localhost` zu verbinden, ergibt:
 
 ```text
 This MCP server URL cannot be used: Blocked: 'localhost' resolves to
@@ -91,9 +85,50 @@ private/internal address '::1'. SSRF protection does not allow requests to
 internal networks.
 ```
 
-Die URL einer MCP-Verbindung wird für jede Loopback-, private, Link-Local- oder Shared-CGNAT-Adresse bedingungslos abgelehnt - es gibt keine Ausnahme für die lokale Entwicklung, weil derselbe Check auch eine `cdp_url` und jeden OAuth-Discovery-Hop absichert. Siehe [eine URL, die dieses Deployment nicht erreichen darf, wird abgelehnt](../mcp.md#a-connection). Ein Postgres-MCP-Server, der nur unter `localhost` oder einer privaten Netzwerkadresse erreichbar ist - der gewöhnliche Ort, einen zum ersten Mal laufen zu lassen - kann von der eigenen Maschine dieses Deployments aus nicht verbunden werden. Ihn zu erreichen braucht eine routbare Adresse: einen kleinen Host mit einer öffentlichen oder per VPN erreichbaren IP, oder einen Tunnel, davor.
+Ein Server im eigenen Netz des Deployments - der gewöhnliche Ort, einen zum ersten Mal laufen zu lassen - wird genauso abgelehnt, bis der Betreiber seinen Host einträgt - seinen eigenen Namen, nie `localhost`, eine Loopback-Adresse oder die Maschine, auf der der Stack läuft:
 
-Das obige SQL wurde direkt gegen Postgres ausgeführt und geprüft; die Rollenablehnung und die zitierten View-Summen sind echt. Nicht verifiziert wurde, dass ein Agent tatsächlich über den verbundenen Server abfragt, weil der Server nie erreichbar war, um ihn zu verbinden.
+1. Betreiben Sie den Server unter einem Namen wie `postgres-mcp` in einem Netz, das die API und der Prefect-Runner teilen, damit beide ihn unter diesem Namen erreichen: im Stack aus `docker-compose.yml` als Dienst in dessen Netz `backend`. Image und Startflags entnehmen Sie dem README des Servers selbst, aber veröffentlichen Sie keinen Port, auch wenn das README es tut: Über einen veröffentlichten Port lässt er sich von außen aufrufen, an der API vorbei. Lesen Sie, [was er erreichen kann](../mcp.md#what-a-listed-host-opens), bevor Sie ein Image wählen.
+
+    Auf einem Server betreiben Sie ihn aus einer eigenen compose-Datei unter einem eigenen Projekt (`-p`), die dem Netz des Stacks als `external: true` beitritt, so wie [das Produktions-Frontend es tut](../deploy.md#option-b-nginx): `agenticos_edge` für `docker-compose-prod.yml`, `agenticos_backend` auf dem Dev-Server. Bearbeiten Sie stattdessen keine versionierte compose-Datei: Das kann den Checkout beim nächsten Deployment aufhalten.
+
+2. Setzen Sie den Host in `backend/.env`, als JSON-Liste:
+
+    ```bash
+    MCP_ALLOWED_HOSTS=["postgres-mcp"]
+    ```
+
+3. Erstellen Sie den API-Container mit den compose-Dateien neu, die ihn gestartet haben, damit er mit der neuen Umgebung startet - `docker compose restart` behält den alten. Im Stack aus `docker-compose.yml`:
+
+    ```bash
+    docker compose up -d app
+    ```
+
+    Führen Sie auf einem Server nie ein bloßes `docker compose` im Klon aus: Es führt `docker-compose.override.yml` mit der Basisdatei zusammen und ersetzt die API des Servers durch einen lokalen Build. Nennen Sie stattdessen die Dateien des Deployments - fügen Sie auf einem Host, der mit `PROXY=traefik` deployt wurde, `-f docker-compose-prod.traefik.yml` hinzu, oder nehmen Sie auf dem Dev-Server `-f docker-compose-dev.yml`:
+
+    ```bash
+    docker compose --env-file backend/.env -f docker-compose-prod.yml up -d app
+    ```
+
+    Auf einem Host, den [`scripts/deploy.sh`](../deploy.md#by-hand) deployt, stellen Sie dem Kommando den Image-Tag voran, den das Skript deployt hat: `AGENTICOS_VERSION="sha-$(git rev-parse HEAD | cut -c1-7)"`. Das Skript [pinnt ihn nur, solange es läuft](../deploy.md#the-images); ohne ihn startet das Kommando die Version, die `backend/.env` nennt, oder `latest`.
+
+4. Verbinden Sie die URL des Servers unter diesem Namen - zum Beispiel `http://postgres-mcp:8000/mcp`, mit dem Port und dem Pfad aus seinem README. Der Pfad muss zum Transport des Servers passen: Ein Segment `/sse` wählt Server-Sent Events, alles andere streamable HTTP.
+
+Für einen gelisteten Host gilt dreierlei:
+
+- **Er wird exakt abgeglichen und nicht aufgelöst.** Der Eintrag ist der Host genau so, wie die URL ihn schreibt, und das Speichern der Verbindung schlägt ihn nicht im DNS nach. Die URL braucht weiterhin `http://` oder `https://`.
+- **Er wird über ein Bearer-Token angebunden.** Die Anmeldung (OAuth) wird für einen gelisteten Host nicht angeboten, weil die Prüfung der Anmeldung die Liste ignoriert.
+- **Er öffnet den ganzen Host, für jedes Konto.** Jedes Konto in diesem Deployment kann sich mit jedem Port eines gelisteten Hosts verbinden, also muss der Server oder ein Proxy davor das Token prüfen. Die reine Leserolle begrenzt weiterhin, was irgendjemand darüber lesen kann. Siehe [was ein gelisteter Host öffnet](../mcp.md#what-a-listed-host-opens), auch dazu, wie man einen Eintrag rückgängig macht.
+
+Ein Deployment, das die Liste leer lässt, erreicht einen Server weiterhin über eine routbare Adresse davor: einen kleinen Host mit einer öffentlichen IP oder einen Tunnel.
+
+Das obige SQL wurde direkt gegen Postgres ausgeführt und geprüft; die Rollenablehnung, die zitierten View-Summen und die Ablehnung der URL sind echt. Nicht verifiziert wurde der Rest dieser Seite: dass ein gelisteter Server verbunden wird und ein Agent tatsächlich über ihn abfragt.
+
+## Den Server verbinden { #connect-the-server }
+
+1. Wählen Sie unter **Toolbox → MCP servers** eines Agents **Connect a server** und wählen Sie **PostgreSQL** aus dem Katalog, oder verbinden Sie ihn einmal unter **MCP servers** in den Organisationseinstellungen, damit mehr als ein Agent ihn binden kann.
+2. Richten Sie die Verbindung auf Ihren eigenen laufenden Postgres-MCP-Server (zum Beispiel [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp)), konfiguriert mit dem Connection-String von `shop_readonly` und seinem eingeschränkten, reinen Lesemodus - `http://postgres-mcp:8000/mcp`, sobald sein Host gelistet ist. Fügen Sie das Bearer-Token ein, das dieser Server prüft - nicht das Datenbankpasswort - als Token der Verbindung.
+3. Schränken Sie in der Bindung des Agents `allowed_tools` auf die reinen Lese-Tools ein, die der Server anbietet, zusätzlich zu dem, was die Verbindung selbst bereits erlaubt.
+4. Binden Sie nur diese Verbindung, setzen Sie ein Budget, und setzen Sie Instruktionen, die die beiden Views nennen und dem Agent sagen, dass er sagen soll, wenn eine Frage eine Spalte oder eine Tabelle braucht, die die Views nicht führen, statt zu raten.
 
 ## Das Ergebnis prüfen { #check-the-result }
 
@@ -107,7 +142,8 @@ Das obige SQL wurde direkt gegen Postgres ausgeführt und geprüft; die Rollenab
 
 ## Wenn etwas schiefgeht { #when-it-goes-wrong }
 
-- **Die Verbindung wird mit einer SSRF-Meldung abgelehnt.** Die Adresse des Servers ist Loopback, privat oder anderweitig intern für das eigene Netzwerk dieses Deployments - siehe oben. Stellen Sie eine routbare Adresse davor.
+- **Die Verbindung wird mit einer SSRF-Meldung abgelehnt.** Die Adresse des Servers ist Loopback, privat oder anderweitig intern für das eigene Netzwerk dieses Deployments. Tragen Sie seinen Host genau so, wie die URL ihn schreibt, in `MCP_ALLOWED_HOSTS` ein, erstellen Sie den API-Container neu und speichern Sie die Verbindung erneut - siehe [oben](#let-the-deployment-reach-a-server-on-its-own-network) - oder stellen Sie eine routbare Adresse davor.
+- **Für einen gelisteten Host wird keine Anmeldung angeboten, oder der Start von OAuth wird abgelehnt.** Das ist so gewollt: Die Prüfung der Anmeldung liest die Liste nie. Verbinden Sie mit dem Bearer-Token, das der Server prüft.
 - **Der Agent liest die Basistabelle statt der Views.** `shop_readonly` wurde sowohl auf `public` als auch auf `reporting` gewährt, oder das Schema der Basistabelle wurde ihr nie entzogen. Führen Sie das obige `REVOKE` erneut aus.
 - **Eine Abfrage, die der Agent ausführt, sieht aus, als hätte sie etwas geändert.** Das kann nicht sein, wenn die Rolle wirklich kein Schreibrecht hat - prüfen Sie die Rechte der Rolle, bevor Sie annehmen, der Agent habe sich falsch verhalten.
 - **Die Verbindung wird erfolgreich geprüft, aber der Builder listet keine Tools.** Sie wurde noch nicht geprüft, oder die letzte Prüfung ist fehlgeschlagen - `POST /mcp-connections/{id}/test` aktualisiert sie.

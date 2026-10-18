@@ -21,10 +21,11 @@ unreadable the moment they switched. Neither is encrypted with a deployment-wide
 key any more; that gave a ciphertext no owner at all.
 
 The service also owns SSRF validation of submitted URLs (same policy as
-webhooks), the connectivity test that discovers a server's tools, and building
-per-turn agent toolsets - either from the user's own enabled connections (the
-general assistant) or from the organization-scoped ones a published agent's
-spec names.
+webhooks, except that a host on the deployment's `MCP_ALLOWED_HOSTS` skips the
+private-address check, and only on a connection's own address), the
+connectivity test that discovers a server's tools, and building per-turn agent
+toolsets - either from the user's own enabled connections (the general
+assistant) or from the organization-scoped ones a published agent's spec names.
 """
 
 from __future__ import annotations
@@ -128,7 +129,7 @@ def _now_epoch() -> float:
     return datetime.now(UTC).timestamp()
 
 
-async def _checked_url(url: str) -> str:
+async def _checked_url(url: str, *, honour_allowlist: bool = False) -> str:
     """SSRF-check a submitted URL, refusing it as a 400 rather than a crash.
 
     `validate_mcp_url` raises `SSRFBlockedError`, which subclasses `ValueError`
@@ -153,12 +154,20 @@ async def _checked_url(url: str) -> str:
     goes to the log and the body stays empty. `tests/test_ssrf.py` fails on a
     refusal that is not a `UrlRefusedError`.
 
+    `honour_allowlist` is passed by the four callers that save a connection's
+    own address - `create`, `update`, `create_for_org` and `update_for_org` -
+    and by nothing else. `probe_sign_in` and `_oauth_start` keep the strict
+    default because they go on to `mcp_oauth.discover`, which never honours the
+    list: a listed URL let through here would be refused hop by hop there
+    instead, and `mcp_oauth._send` logs each refused request's full URL. OAuth
+    for a listed host is out of scope, and this 400 is the honest answer to it.
+
     Raises:
         BadRequestError: If the URL is malformed or points inside the
             deployment's network.
     """
     try:
-        return await validate_mcp_url(url)
+        return await validate_mcp_url(url, honour_allowlist=honour_allowlist)
     except UrlRefusedError as exc:
         # Ours to quote, in the log as much as in the body - see the docstring.
         logger.warning("MCP server URL refused: %s", exc)
@@ -670,7 +679,7 @@ class McpConnectionService:
                 message=f"Unknown catalog server: {data.catalog_key}",
                 details={"catalog_key": data.catalog_key},
             )
-        url = await _checked_url(data.url)
+        url = await _checked_url(data.url, honour_allowlist=True)
         existing = await mcp_connection_repo.get_by_name(self.db, user_id=user_id, name=data.name)
         if existing is not None:
             raise AlreadyExistsError(
@@ -733,7 +742,7 @@ class McpConnectionService:
         )
 
         if "url" in update_data:
-            update_data["url"] = await _checked_url(update_data["url"])
+            update_data["url"] = await _checked_url(update_data["url"], honour_allowlist=True)
 
         if "name" in update_data and update_data["name"] != db_connection.name:
             collision = await mcp_connection_repo.get_by_name(
@@ -1712,7 +1721,7 @@ class McpConnectionService:
                 message=f"Unknown catalog server: {data.catalog_key}",
                 details={"catalog_key": data.catalog_key},
             )
-        url = await _checked_url(data.url)
+        url = await _checked_url(data.url, honour_allowlist=True)
         existing = await mcp_connection_repo.get_org_scoped_by_name(
             self.db, organization_id=ctx.organization_id, name=data.name
         )
@@ -1786,7 +1795,7 @@ class McpConnectionService:
             edited_fields.add("allowed_tools")
 
         if "url" in update_data:
-            update_data["url"] = await _checked_url(update_data["url"])
+            update_data["url"] = await _checked_url(update_data["url"], honour_allowlist=True)
 
         if "label" in update_data:
             update_data["label"] = _stored_label(update_data["label"])

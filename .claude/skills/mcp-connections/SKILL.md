@@ -104,6 +104,17 @@ The **connection's own URL** is checked at save and resolved again at run time â
 point-in-time check (#840), bearable only because an operator typed it. A URL a *model*
 chose belongs in neither; it needs `safe_download`.
 
+`MCP_ALLOWED_HOSTS` exempts a listed host from the private-address half of that
+save-time check, and from nothing else: the scheme, userinfo and port checks still
+run, and a listed host is not resolved. It works through
+`validate_mcp_url(url, honour_allowlist=True)`, which only `_checked_url`'s four
+create and update callers (personal and organization) ask for. The consent URL, the
+sign-in probe, OAuth start, the catalog audit and every `PinnedAsyncClient` request
+stay strict. Never pass the flag for a URL a remote server chose, and never add an
+exemption to `resolve_pinned_url`. The check is save-time only, so removing an entry
+leaves existing connections working, and a PATCH that only flips `is_enabled` is not
+re-checked: `update` and `update_for_org` check only when `url` is in the body.
+
 An organization's OAuth connection is still the consenting person's grant at the
 provider. Revoking their access there breaks the organization's server.
 
