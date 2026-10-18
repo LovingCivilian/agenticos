@@ -318,6 +318,10 @@ The code is as planned. The differences are in the details and the docs.
 - **Two sentences went from the howto.** Its fallback no longer offers a
   "VPN-reachable IP", which this check refuses, and it no longer says the same
   check guards a `cdp_url`, which has had its own allowlist for some time.
+- **The changelog entry is in `CHANGELOG.fork.md`.** The plan put it under
+  `[Unreleased]` in `CHANGELOG.md`. This fork keeps upstream's changelog
+  identical to upstream's, so a sync never conflicts there, and records its own
+  changes in `CHANGELOG.fork.md` instead.
 - **Placement in `docs/mcp.md`.** Two new paragraphs sit later than the plan
   said, so they do not separate a pronoun from what it refers to.
 - **Not run end to end.** The tests and the docs build pass, and the MCP

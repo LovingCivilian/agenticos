@@ -17,21 +17,6 @@ Two things are versioned separately from this file and worth knowing about:
 
 ## [Unreleased]
 
-### Added
-
-- **`MCP_ALLOWED_HOSTS`, for an MCP server on the deployment's own network.** A
-  connection to a host that resolves to a private, loopback or other internal
-  address - a compose service such as `postgres-mcp` - was refused with no way
-  past. An operator can now list such hosts, as a JSON list. Matching is exact
-  and case-insensitive, with no wildcards; a listed host skips the
-  private-address check and is not resolved, but still needs `http` or `https`.
-  It is for bearer-token and unauthenticated servers: OAuth sign-in, its
-  discovery and its consent URL are checked without the list, as before. An
-  entry opens every port on that host to every account on the deployment, so
-  name only a server that checks a token for each caller, or whose tools are
-  safe for anyone who can sign in, and never a loopback or one of the stack's
-  own services. Empty, the default, changes nothing.
-
 ## [1.5.0] - 2026-10-18
 
 ### Added
