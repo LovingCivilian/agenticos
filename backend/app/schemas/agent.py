@@ -604,6 +604,19 @@ class McpCatalog(BaseSchema):
     )
 
 
+class PlatformMcpTool(BaseSchema):
+    name: str = Field(description="The tool's name on the platform's MCP server")
+    description: str = Field(description="The first line of what the model reads")
+    writes: bool = Field(
+        description="Whether it changes something - held for approval under `approval: writes`"
+    )
+
+
+class PlatformMcpToolList(BaseSchema):
+    items: list[PlatformMcpTool]
+    total: int
+
+
 class CapabilityCatalog(BaseSchema):
     items: list[CapabilityCatalogEntry]
     total: int
@@ -736,6 +749,12 @@ class AgentRunResult(BaseSchema):
     )
     input_tokens: int
     output_tokens: int
+    cache_read_tokens: int = Field(
+        default=0, description="Of `input_tokens`, those read from the provider's cache"
+    )
+    cache_write_tokens: int = Field(
+        default=0, description="Of `input_tokens`, those written to the provider's cache"
+    )
     steps: list[RunStep] = Field(
         default_factory=list,
         description=(

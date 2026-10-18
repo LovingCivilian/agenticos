@@ -202,6 +202,7 @@ export type WSEventType =
   | "thinking_delta"
   | "part_start"
   | "tool_call_delta"
+  | "visual_images"
   | "tool_call"
   | "tool_result"
   | "final_result"
@@ -323,6 +324,10 @@ export interface BrowserFrame {
 export interface TurnUsage {
   input_tokens: number;
   output_tokens: number;
+  /** Of `input_tokens`, those read from the provider's cache - priced at a fraction. */
+  cache_read_tokens?: number | null;
+  /** Of `input_tokens`, those written to the provider's cache - priced above it. */
+  cache_write_tokens?: number | null;
   /** The turn's cost as a Decimal string, the shape every REST surface uses. */
   cost_usd: string;
   /**

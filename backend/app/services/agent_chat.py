@@ -45,8 +45,10 @@ from app.agents.capabilities.media import offloaded_history
 from app.agents.connect_on_use import ConnectionCallback
 from app.agents.deps import AgentDeps, AskUserCallback, CompactionSink, QuestionsCallback
 from app.agents.failures import run_failure_summary
+from app.agents.loop_guard import ToolLoopStopped
 from app.agents.steering import SteeringInbox
 from app.agents.subagent_events import SubagentEventSink
+from app.agents.visual_reports import VisualReports
 from app.core.exceptions import AuthorizationError, BadRequestError
 from app.core.permissions import AuthContext
 from app.db.models.agent_run import RunStatus, RunSurface
@@ -404,6 +406,7 @@ class ChatAgentRunner:
         person_time_zone: str | None = None,
         testing: Testing = Testing(test=False, draft=False),
         steering: SteeringInbox | None = None,
+        visual_reports: VisualReports | None = None,
     ) -> ChatTurn:
         """Run the named agent for this turn and record what it consumed.
 
@@ -454,6 +457,8 @@ class ChatAgentRunner:
                 and `on_personal_gaps` hears only the gaps nobody here can fix.
             steering: Where what the person sends mid-run lands, read by the
                 model at its next request (#2087).
+            visual_reports: Where the console reports how each drawing rendered,
+                so `draw` can tell the model what broke (#2171).
 
         Returns:
             The answer to show and persist, and the model that produced it. A
@@ -514,6 +519,7 @@ class ChatAgentRunner:
         # And what the person adds while it works: the surface fills it, the next
         # model request reads it.
         prepared.deps.steering = steering
+        prepared.deps.visual_reports = visual_reports
         if steering is not None:
             steering.screen = input_screen_for(prepared.spec)
         # Before the model answers, not after: the model is about to say it cannot
@@ -618,6 +624,13 @@ class ChatAgentRunner:
             error = str(exc)
             logger.info("Chat run %s blocked by a %s guardrail", prepared.run.id, exc.edge)
             raise
+        except ToolLoopStopped as exc:
+            # Raised on, like a guardrail block: the person is owed the reason
+            # the answer stopped, and it names tools, never what they returned.
+            status = RunStatus.LOOP_STOPPED
+            error = str(exc)
+            logger.info("Chat run %s stopped for looping: %s", prepared.run.id, exc)
+            raise
         except Exception as exc:
             error = run_failure_summary(exc)
             logger.exception("Chat run %s failed", prepared.run.id)
@@ -641,6 +654,7 @@ class ChatAgentRunner:
                     paused_state=paused,
                     budget_scope=budget_scope,
                 )
+                await self.runner.keep_plan(prepared, status=status)
                 await self.db.commit()
                 await change_feed.publish_run(prepared.run, "updated")
             except Exception:
