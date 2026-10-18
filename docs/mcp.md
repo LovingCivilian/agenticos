@@ -27,7 +27,7 @@ Atlassian works alongside a streamable-HTTP one with nothing to configure.
 | | |
 |---|---|
 | `name` | Also the tool prefix. See [Name collisions](#name-collisions) |
-| `url` | SSRF-validated before we ever request it |
+| `url` | SSRF-validated before we ever request it. A host on the deployment's [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) skips the address check, not the rest |
 | `auth_token` | Sealed in the [vault](secrets.md), never returned by any endpoint |
 | `allowed_tools` | An allowlist, or null for "everything the server offers". A binding narrows within it — see below |
 | `is_enabled` | Off without losing the credential |
@@ -52,6 +52,48 @@ Atlassian works alongside a streamable-HTTP one with nothing to configure.
     the platform breaking rather than as an address to correct
     ([#861](https://github.com/vstorm-co/agenticos/issues/861)) — self-hosting and
     pasting a `localhost` URL is the ordinary case, not the exotic one.
+
+    The one way past is the operator's: a host listed in
+    [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) is not checked
+    against those ranges, or resolved, when a connection is created or edited.
+    Its scheme, userinfo and port still are. Starting an OAuth flow against a
+    listed host, or asking whether it offers sign-in, is still refused - such a
+    server is connected with a bearer token, or with none. Read
+    [what a listed host opens](#what-a-listed-host-opens) before you add one.
+
+### What a listed host opens
+
+An entry in [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) is the
+operator vouching for whatever that name resolves to, for every account on the
+deployment. Before you add one, know what it opens:
+
+- **The whole host.** The match is on the host alone, so every port and path on
+  it is reachable. List only a name the MCP server alone answers to. Never
+  list a loopback (`localhost`, `127.0.0.1`, `::1`), the machine the stack runs
+  on (its address, a Docker network's gateway, `host.docker.internal`) or a name
+  one of this stack's own services answers to: `app` and its alias `backend`,
+  `db`, `redis`, `prefect-server`, `sandboxd`, or any other service in its
+  compose files.
+- **What it reaches.** A server on the stack's network reaches the Prefect
+  server's unauthenticated API, and the API and the frontend past the reverse
+  proxy; on the dev server and in the `docker-compose.yml` stack, every service
+  on the `backend` network too: the database, Redis and `sandboxd` among them.
+  Its tools act for every account: run only an image you trust, and no server
+  whose tools fetch an address the caller chooses.
+- **Every account.** The list is deployment-wide. Every account can save a
+  personal connection to a listed host - under the default
+  [open sign-up](deployment.md#who-may-register), anyone who registers - and
+  every `mcp:manage` holder an organization one. List only a server that
+  checks a bearer token for each caller, or whose tools are safe for anyone who
+  can sign in.
+- **Until the connection is deleted.** The address is checked only when a
+  connection's URL is saved. Removing an entry does not disconnect a saved
+  connection, and re-enabling a disabled one is not checked again, so delete
+  those connections. A personal connection has no admin route: its owner deletes
+  it, or you delete its row in the database.
+  `agenticos cmd data-protection-report` lists the endpoint of every enabled
+  connection; find a disabled one by its `url` in the `mcp_connections` table.
+  A URL is kept as it was typed, so match its host ignoring case (`ILIKE`).
 
 ### Personal or organization-wide
 
@@ -345,6 +387,10 @@ endpoint, the registration endpoint and every redirect after them are named by t
 remote server's own discovery documents. Nobody in your organization had to be the
 attacker.
 
+[`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) does not reach this flow:
+the pinned client checks every request without it, so a discovery document cannot
+reach an internal address by naming a listed host.
+
 Redirects are followed one hop at a time, bounded at five, each with its own check.
 A `302` to a new host is re-resolved, not trusted.
 
@@ -359,7 +405,9 @@ Two edges remain, both narrow and both deliberate:
 - The **consent URL** is checked and then handed to somebody's browser, which
   resolves it itself. There is no pinning to do.
 - The **connection's own URL** is checked at save and resolved again when an agent
-  runs — operator-typed, so rebinding it means being the operator.
+  runs — operator-typed, so rebinding it means being the operator. A host on
+  `MCP_ALLOWED_HOSTS` is not range-checked at all (see
+  [what a listed host opens](#what-a-listed-host-opens)).
 
 Nothing a *model* chooses reaches this check at all, and nothing should: a URL an
 agent picked wants Pydantic AI's `safe_download`.

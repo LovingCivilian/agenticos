@@ -755,6 +755,17 @@ class Settings(BaseSettings):
     # and is not on a hosted browser; empty sends the browser straight out.
     BROWSER_EGRESS_PROXY: str = ""
 
+    # Hosts an MCP connection's own URL may name although they resolve inside the
+    # deployment's network - a compose service such as `postgres-mcp`, which the
+    # SSRF guard refuses with no way past because it admits only *public*
+    # addresses. A listed host skips the private-address half of that check in
+    # `app.agents.mcp.validate_mcp_url` and is not resolved; it still needs http
+    # or https. Each entry is one host, matched exactly and case-folded: no
+    # globs, CIDR ranges or ports. Only saving a connection's URL reads it - the
+    # sign-in probe, OAuth start and discovery, the consent URL and the catalog
+    # audit never do. Empty keeps every internal address refused.
+    MCP_ALLOWED_HOSTS: list[str] = []
+
     @field_validator("CORS_ORIGINS")
     @classmethod
     def validate_cors_origins(cls, v: list[str], info: ValidationInfo) -> list[str]:

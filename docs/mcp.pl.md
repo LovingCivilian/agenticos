@@ -1,5 +1,5 @@
 ---
-source_sha: "3409285bde3b"
+source_sha: "398a189cf08d"
 ---
 
 # MCP — narzędzia, których nikt tutaj nie musi pisać { #mcp-the-tools-nobody-here-has-to-write }
@@ -34,7 +34,7 @@ niczego do konfigurowania.
 | | |
 |---|---|
 | `name` | Zarazem prefiks narzędzi. Zobacz [Kolizje nazw](#name-collisions) |
-| `url` | Sprawdzany pod kątem SSRF, zanim w ogóle wyślemy do niego żądanie |
+| `url` | Sprawdzany pod kątem SSRF, zanim w ogóle wyślemy do niego żądanie. Host z [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) wdrożenia pomija sprawdzenie adresu, ale nie resztę |
 | `auth_token` | Zapieczętowany w [vaulcie](secrets.md), nigdy nie zwracany przez żaden endpoint |
 | `allowed_tools` | Lista dozwolonych albo null, czyli „wszystko, co serwer oferuje”. Powiązanie zawęża ją dalej — zobacz niżej |
 | `is_enabled` | Wyłączenie bez utraty poświadczenia |
@@ -58,6 +58,51 @@ niczego do konfigurowania.
     platformy, a nie jak adres do poprawienia
     ([#861](https://github.com/vstorm-co/agenticos/issues/861)) — self-hosting
     i wklejenie URL-a z `localhost` to przypadek zwyczajny, nie egzotyczny.
+
+    Jedyna droga obejścia należy do operatora: host wpisany do
+    [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) nie jest
+    sprawdzany względem tych zakresów ani rozwiązywany, gdy połączenie jest
+    tworzone albo edytowane. Jego schemat, userinfo i port nadal są sprawdzane.
+    Start flow OAuth do hosta z listy albo pytanie, czy oferuje on logowanie,
+    nadal jest odrzucane - taki serwer podłącza się z tokenem bearer albo bez
+    żadnego. Zanim dodasz taki host, przeczytaj,
+    [co otwiera host z listy](#what-a-listed-host-opens).
+
+### Co otwiera host z listy { #what-a-listed-host-opens }
+
+Wpis w [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) to operator
+poręczający za wszystko, na co rozwiązuje się ta nazwa - wobec każdego konta we
+wdrożeniu. Zanim go dodasz, sprawdź, co otwiera:
+
+- **Cały host.** Dopasowanie dotyczy wyłącznie hosta, więc osiągalny jest każdy
+  port i każda ścieżka na nim. Wpisuj tylko nazwę, pod którą odpowiada wyłącznie
+  serwer MCP. Nigdy nie wpisuj loopbacku (`localhost`, `127.0.0.1`, `::1`),
+  maszyny, na której działa stack (jej adresu, bramy sieci Dockera,
+  `host.docker.internal`), ani nazwy, pod którą odpowiada jedna z własnych usług
+  tego stacku: `app` i jej alias `backend`, `db`, `redis`, `prefect-server`,
+  `sandboxd` albo dowolna inna usługa z jego plików compose.
+- **Do czego sięga.** Serwer w sieci stacku sięga do API serwera Prefect,
+  dostępnego bez uwierzytelniania, a także do API i frontendu z pominięciem
+  reverse proxy; na serwerze deweloperskim i w stacku `docker-compose.yml` także
+  do każdej usługi w jego sieci `backend`, w tym do bazy danych, Redisa i
+  `sandboxd`. Jego narzędzia działają w imieniu każdego konta:
+  uruchamiaj tylko obraz, któremu ufasz, i żadnego serwera, którego narzędzia
+  pobierają adres wybrany przez wywołującego.
+- **Każde konto.** Lista obowiązuje w całym wdrożeniu. Każde konto może zapisać
+  osobiste połączenie do hosta z listy - przy domyślnej
+  [otwartej rejestracji](deployment.md#who-may-register) każdy, kto się
+  zarejestruje - a każdy posiadacz `mcp:manage` połączenie organizacji.
+  Wpisuj tylko serwer, który sprawdza token bearer każdego wywołującego, albo
+  taki, którego narzędzia są bezpieczne dla każdego, kto może się zalogować.
+- **Dopóki połączenie nie zostanie usunięte.** Adres jest sprawdzany tylko
+  wtedy, gdy zapisywany jest URL połączenia. Usunięcie wpisu nie rozłącza
+  zapisanego połączenia, a ponowne włączenie wyłączonego nie jest sprawdzane
+  jeszcze raz, więc usuń te połączenia. Osobiste połączenie nie ma trasy dla
+  administratora: usuwa je jego właściciel albo ty, usuwając jego wiersz w bazie
+  danych. `agenticos cmd data-protection-report` wypisuje endpoint każdego
+  włączonego połączenia; wyłączone znajdziesz po `url` w tabeli
+  `mcp_connections`. URL jest zapisywany tak, jak go wpisano, więc dopasuj
+  host bez względu na wielkość liter (`ILIKE`).
 
 ### Osobiste albo dla całej organizacji { #personal-or-organization-wide }
 
@@ -361,6 +406,10 @@ server, token endpoint, registration endpoint i każde przekierowanie po nich s�
 wskazywane przez własne dokumenty discovery zdalnego serwera. Nikt w twojej
 organizacji nie musiał być atakującym.
 
+[`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) nie sięga do tego
+flow: przypięty klient sprawdza każde żądanie bez tej listy, więc dokument
+discovery nie dotrze do adresu wewnętrznego, wskazując host z listy.
+
 Przekierowania są podążane po jednym przeskoku, z limitem pięciu, każde
 z własnym sprawdzeniem. `302` na nowy host jest rozwiązywane od nowa, a nie brane
 na wiarę.
@@ -377,7 +426,9 @@ Zostają dwa brzegi, oba wąskie i oba celowe:
   rozwiązuje go sama. Nie ma tu czego przypinać.
 - **Własny URL połączenia** jest sprawdzany przy zapisie i rozwiązywany ponownie,
   gdy agent działa — wpisuje go operator, więc przestawienie go wymaga bycia
-  operatorem.
+  operatorem. Host z `MCP_ALLOWED_HOSTS` nie jest w ogóle sprawdzany względem
+  zakresów adresów (zobacz
+  [co otwiera host z listy](#what-a-listed-host-opens)).
 
 Nic, co wybiera *model*, w ogóle nie dociera do tego sprawdzenia — i nie powinno:
 URL wybrany przez agenta należy do `safe_download` z Pydantic AI.

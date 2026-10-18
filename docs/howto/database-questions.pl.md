@@ -1,17 +1,18 @@
 ---
-source_sha: "351588808d86"
+source_sha: "4127fd6b43f9"
 title: "Odpowiadaj na pytania z bazy danych"
 description: "Podłącz samodzielnie hostowany serwer MCP dla Postgresa za rolą tylko do odczytu i schematem zawierającym wyłącznie widoki, a potem pozwól agentowi go odpytywać."
 ---
 
 # Odpowiadaj na pytania z bazy danych { #answer-questions-from-your-database }
 
-Podłącz serwer MCP dla Postgresa, żeby agent mógł odpowiadać na pytania z Twojej własnej bazy danych, a wcześniej postaw między agentem a tabelami rolę tylko do odczytu i schemat zawierający wyłącznie widoki. To instrukcja wykonania, a nie raport z pomiaru wdrożenia. Serwera MCP, którego wymaga ten przepis, nie da się osiągnąć z tej instalacji, z powodu opisanego niżej, więc nic tu nie zostało uruchomione od początku do końca z działającym agentem.
+Podłącz serwer MCP dla Postgresa, żeby agent mógł odpowiadać na pytania z Twojej własnej bazy danych, a wcześniej postaw między agentem a tabelami rolę tylko do odczytu i schemat zawierający wyłącznie widoki. To instrukcja wykonania, a nie raport z pomiaru wdrożenia: nic tu nie zostało uruchomione od początku do końca z działającym agentem.
 
 ## Czego potrzebujesz { #what-you-need }
 
 - [Działająca instalacja](../install.md) z profilem modelu.
 - Serwer MCP dla Postgresa, który uruchamiasz sam, dostępny pod adresem URL, z którym to wdrożenie może się połączyć. Wpis `postgres` w katalogu jest dokładnie tym: bez hostowanego adresu, z tokenem bearer, który sprawdza *Twój własny serwer*, i z ostrzeżeniem, żeby kierować go na widoki tylko do odczytu, a nie na bazę główną z prawem zapisu. Zobacz [katalog](../mcp.md#data-and-analytics).
+- Dla serwera w sieci samego wdrożenia - usługi compose, adresu prywatnego - jego host w [`MCP_ALLOWED_HOSTS`](../configuration.md#project-settings). Zobacz [niżej](#let-the-deployment-reach-a-server-on-its-own-network).
 - `connections:manage`, żeby zarejestrować połączenie organizacji.
 
 ## Dlaczego rola tylko do odczytu i schemat z samymi widokami { #why-a-read-only-role-and-a-views-only-schema }
@@ -74,16 +75,9 @@ REVOKE ALL ON SCHEMA public FROM shop_readonly;
 
 Odpowiedź referencyjna, żeby sprawdzić odpowiedź ze źródłowymi wierszami: `status_counts` daje paid 6 zamówień / 26700 centów, pending 1 / 2500, refunded 1 / 4200. Bezpośrednie zapytanie `shop_readonly` do `orders` jest odrzucane komunikatem `permission denied for table orders`, więc widoki są jedynymi drzwiami.
 
-## Podłącz serwer { #connect-the-server }
+## Pozwól wdrożeniu sięgnąć do serwera w jego własnej sieci { #let-the-deployment-reach-a-server-on-its-own-network }
 
-1. W **Toolbox → MCP servers** agenta wybierz **Connect a server** i z katalogu **PostgreSQL** albo podłącz go raz w **MCP servers** w ustawieniach organizacji, żeby mogło go przypisać więcej niż jednego agenta.
-2. Skieruj połączenie na własny działający serwer MCP dla Postgresa (na przykład [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp)) skonfigurowany z connection stringiem `shop_readonly` i w ograniczonym trybie tylko do odczytu. Jako token połączenia wklej token bearer, który sprawdza ten serwer, a nie hasło do bazy.
-3. W przypisaniu agenta zawęź `allowed_tools` do narzędzi tylko do odczytu, które udostępnia serwer, dodatkowo względem tego, na co pozwala już samo połączenie.
-4. Przypisz tylko to połączenie, ustaw budżet i instrukcje, które nazywają dwa widoki i każą agentowi powiedzieć, gdy pytanie wymaga kolumny albo tabeli, której widoki nie mają, zamiast zgadywać.
-
-## Dlaczego nie dało się tego tu uruchomić { #why-this-could-not-be-run-here }
-
-Próba podłączenia serwera do tej instalacji została odrzucona:
+Adres URL połączenia MCP jest odrzucany przy zapisie, jeśli jego host rozwiązuje się na adres loopback, prywatny, link-local albo ze współdzielonej puli CGNAT. Zobacz [adres URL, do którego to wdrożenie nie może sięgać, jest odrzucany](../mcp.md#a-connection). Próba podłączenia serwera pod `localhost` kończy się komunikatem:
 
 ```text
 This MCP server URL cannot be used: Blocked: 'localhost' resolves to
@@ -91,9 +85,50 @@ private/internal address '::1'. SSRF protection does not allow requests to
 internal networks.
 ```
 
-Adres URL połączenia MCP jest zawsze odrzucany dla każdego adresu loopback, prywatnego, link-local albo ze współdzielonej puli CGNAT. Nie ma wyjątku dla środowiska lokalnego, bo ta sama kontrola chroni też `cdp_url` i każdy krok wykrywania OAuth. Zobacz [adres URL, do którego to wdrożenie nie może sięgać, jest odrzucany](../mcp.md#a-connection). Serwera MCP dla Postgresa dostępnego tylko pod `localhost` albo adresem w sieci prywatnej, czyli tam, gdzie zwykle uruchamia się go po raz pierwszy, nie da się podłączyć z maszyny tego samego wdrożenia. Potrzebny jest routowalny adres przed serwerem: mały host z publicznym albo dostępnym przez VPN IP albo tunel.
+Serwer w sieci samego wdrożenia, czyli tam, gdzie zwykle uruchamia się go po raz pierwszy, jest odrzucany tak samo, dopóki operator nie wpisze jego hosta na listę - jego własnej nazwy, nigdy `localhost`, adresu loopback ani maszyny, na której działa stack:
 
-Powyższy SQL został uruchomiony i sprawdzony bezpośrednio w Postgresie. Odmowa dla roli i podane sumy z widoków są prawdziwe. Nie zweryfikowano tego, że agent faktycznie odpytuje bazę przez podłączony serwer, bo serwera nigdy nie dało się podłączyć.
+1. Uruchom serwer pod nazwą taką jak `postgres-mcp`, w sieci, którą dzielą API i runner Prefecta, żeby oba docierały do niego pod tą nazwą: w stacku `docker-compose.yml` jako usługę w jego sieci `backend`. Obraz i flagi uruchomienia weź z README samego serwera, ale nie publikuj żadnego portu, nawet jeśli README to robi: opublikowany port pozwala wywołać serwer z zewnątrz, z pominięciem API. Zanim wybierzesz obraz, przeczytaj, [do czego może sięgnąć](../mcp.md#what-a-listed-host-opens).
+
+    Na serwerze uruchom go z własnego pliku compose i jako osobny projekt (`-p`), dołączając do sieci stacku jako `external: true`, tak jak [robi to frontend produkcyjny](../deploy.md#option-b-nginx): `agenticos_edge` dla `docker-compose-prod.yml`, `agenticos_backend` na serwerze deweloperskim. Nie edytuj zamiast tego śledzonego pliku compose: to może zatrzymać checkout przy kolejnym wdrożeniu.
+
+2. Ustaw host w `backend/.env` jako listę JSON:
+
+    ```bash
+    MCP_ALLOWED_HOSTS=["postgres-mcp"]
+    ```
+
+3. Utwórz kontener API od nowa z plikami compose, które go uruchomiły, żeby wystartował z nowym środowiskiem - `docker compose restart` zostawia stary. W stacku `docker-compose.yml`:
+
+    ```bash
+    docker compose up -d app
+    ```
+
+    Na serwerze nigdy nie uruchamiaj w klonie samego `docker compose`: scala on `docker-compose.override.yml` i zastępuje API serwera lokalnym buildem. Zamiast tego podaj pliki wdrożenia - dodaj `-f docker-compose-prod.traefik.yml` na hoście wdrożonym z `PROXY=traefik` albo użyj `-f docker-compose-dev.yml` na serwerze deweloperskim:
+
+    ```bash
+    docker compose --env-file backend/.env -f docker-compose-prod.yml up -d app
+    ```
+
+    Na hoście, który wdraża [`scripts/deploy.sh`](../deploy.md#by-hand), poprzedź tę komendę tagiem obrazu, który ten skrypt wdrożył: `AGENTICOS_VERSION="sha-$(git rev-parse HEAD | cut -c1-7)"`. Skrypt [przypina go tylko na czas swojego działania](../deploy.md#the-images); bez niego komenda uruchamia wersję wskazaną w `backend/.env` albo `latest`.
+
+4. Połącz się z URL-em serwera pod tą nazwą - na przykład `http://postgres-mcp:8000/mcp`, z portem i ścieżką podanymi w jego README. Ścieżka musi pasować do transportu serwera: segment `/sse` wybiera server-sent events, każda inna streamable HTTP.
+
+Dla hosta z listy obowiązują trzy zasady:
+
+- **Jest dopasowywany dokładnie i nie jest rozwiązywany.** Wpis to host zapisany dokładnie tak, jak w URL-u, a zapis połączenia nie sprawdza go w DNS. URL nadal wymaga `http://` albo `https://`.
+- **Łączy się z nim tokenem bearer.** Logowanie (OAuth) nie jest oferowane dla hosta z listy, bo sprawdzenie logowania pomija tę listę.
+- **Otwiera cały host, dla każdego konta.** Każde konto w tym wdrożeniu może połączyć się z dowolnym portem hosta z listy, więc serwer albo proxy przed nim musi sprawdzać token. Rola tylko do odczytu nadal ogranicza to, co ktokolwiek może przez niego odczytać. Zobacz, [co otwiera host z listy](../mcp.md#what-a-listed-host-opens) i jak cofnąć wpis.
+
+Wdrożenie, które zostawia listę pustą, nadal może sięgnąć do serwera przez routowalny adres przed nim: mały host z publicznym IP albo tunel.
+
+Powyższy SQL został uruchomiony i sprawdzony bezpośrednio w Postgresie. Odmowa dla roli, podane sumy z widoków i odmowa dla adresu URL są prawdziwe. Nie zweryfikowano reszty tej strony: podłączenia serwera z listy i tego, że agent faktycznie odpytuje przez niego bazę.
+
+## Podłącz serwer { #connect-the-server }
+
+1. W **Toolbox → MCP servers** agenta wybierz **Connect a server** i z katalogu **PostgreSQL** albo podłącz go raz w **MCP servers** w ustawieniach organizacji, żeby mogło go przypisać więcej niż jednego agenta.
+2. Skieruj połączenie na własny działający serwer MCP dla Postgresa (na przykład [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp)) skonfigurowany z connection stringiem `shop_readonly` i w ograniczonym trybie tylko do odczytu - `http://postgres-mcp:8000/mcp`, gdy jego host jest już na liście. Jako token połączenia wklej token bearer, który sprawdza ten serwer, a nie hasło do bazy.
+3. W przypisaniu agenta zawęź `allowed_tools` do narzędzi tylko do odczytu, które udostępnia serwer, dodatkowo względem tego, na co pozwala już samo połączenie.
+4. Przypisz tylko to połączenie, ustaw budżet i instrukcje, które nazywają dwa widoki i każą agentowi powiedzieć, gdy pytanie wymaga kolumny albo tabeli, której widoki nie mają, zamiast zgadywać.
 
 ## Sprawdź wynik { #check-the-result }
 
@@ -107,7 +142,8 @@ Powyższy SQL został uruchomiony i sprawdzony bezpośrednio w Postgresie. Odmow
 
 ## Gdy coś pójdzie nie tak { #when-it-goes-wrong }
 
-- **Połączenie jest odrzucane z komunikatem o SSRF.** Adres serwera to loopback, adres prywatny albo inny wewnętrzny dla sieci tego wdrożenia; zobacz wyżej. Postaw przed nim routowalny adres.
+- **Połączenie jest odrzucane z komunikatem o SSRF.** Adres serwera to loopback, adres prywatny albo inny wewnętrzny dla sieci tego wdrożenia. Dodaj jego host do `MCP_ALLOWED_HOSTS` dokładnie tak, jak zapisuje go URL, utwórz kontener API od nowa i zapisz połączenie ponownie - zobacz [wyżej](#let-the-deployment-reach-a-server-on-its-own-network) - albo postaw przed nim routowalny adres.
+- **Logowanie nie jest oferowane albo start OAuth jest odrzucany dla hosta z listy.** Tak ma być: sprawdzenie logowania nigdy nie czyta tej listy. Połącz się z tokenem bearer, który sprawdza serwer.
 - **Agent czyta tabelę bazową zamiast widoków.** `shop_readonly` dostała uprawnienia do `public` oprócz `reporting` albo nigdy nie odebrano jej schematu tabeli bazowej. Uruchom ponownie `REVOKE` z góry.
 - **Zapytanie agenta wygląda, jakby coś zmieniło.** Nie mogło, jeśli rola naprawdę nie ma uprawnień do zapisu. Sprawdź uprawnienia roli, zanim uznasz, że agent zachował się źle.
 - **Test połączenia przechodzi, ale Builder nie pokazuje żadnych narzędzi.** Nic go jeszcze nie odpytało albo ostatnie sprawdzenie się nie powiodło. `POST /mcp-connections/{id}/test` je odświeża.

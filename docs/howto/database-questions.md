@@ -8,9 +8,7 @@ description: "Connect a self-hosted Postgres MCP server behind a read-only role 
 Connect a Postgres MCP server so an agent can answer questions from your own
 database, and put a read-only role and a views-only schema between the agent
 and your tables before you do. This is a procedure to run, not a report of a
-measured deployment: the MCP server this recipe needs cannot be reached from
-this installation, for a reason explained below, so nothing here was run
-end to end against a live agent.
+measured deployment: nothing here was run end to end against a live agent.
 
 ## What you need
 
@@ -20,6 +18,10 @@ end to end against a live agent.
   bearer token *your own server* checks, and a warning to point it at
   read-only views rather than a primary with write access. See
   [the catalog](../mcp.md#data-and-analytics).
+- For a server on this deployment's own network - a compose service, a private
+  address - its host in
+  [`MCP_ALLOWED_HOSTS`](../configuration.md#project-settings). See
+  [below](#let-the-deployment-reach-a-server-on-its-own-network).
 - `connections:manage`, to register the organization connection.
 
 ## Why a read-only role and a views-only schema
@@ -95,6 +97,95 @@ The reference answer, so you can check a reply against the source rows:
 1 / 4200. `shop_readonly` querying `orders` directly is refused with
 `permission denied for table orders` - the views are the only door.
 
+## Let the deployment reach a server on its own network
+
+An MCP connection's URL is refused when it is saved if its host resolves to a
+loopback, private, link-local or shared-CGNAT address. See
+[a URL this deployment must not reach is refused](../mcp.md#a-connection).
+Connecting a server on `localhost` reads:
+
+```text
+This MCP server URL cannot be used: Blocked: 'localhost' resolves to
+private/internal address '::1'. SSRF protection does not allow requests to
+internal networks.
+```
+
+A server on the deployment's own network - the ordinary place to run one first -
+is refused the same way until the operator lists its host - its own name, never
+`localhost`, a loopback address or the machine the stack runs on:
+
+1. Run the server under a name such as `postgres-mcp`, on a network the API and
+   the Prefect runner share, so both reach it by that name: in the
+   `docker-compose.yml` stack, as a service on its `backend` network. Take its
+   image and run flags from the server's own README, but publish no port, even
+   if the README does: a published port lets it be called from outside, past the
+   API. Read [what it can reach](../mcp.md#what-a-listed-host-opens) before you
+   choose an image.
+
+    On a server, run it from a compose file and a project (`-p`) of its own that
+    joins the stack's network as `external: true`, the way
+    [the production frontend does](../deploy.md#option-b-nginx):
+    `agenticos_edge` for `docker-compose-prod.yml`, `agenticos_backend` for the
+    dev server. Do not edit a tracked compose file instead: that can stop the
+    next deploy's checkout.
+
+2. Set the host in `backend/.env`, as a JSON list:
+
+    ```bash
+    MCP_ALLOWED_HOSTS=["postgres-mcp"]
+    ```
+
+3. Recreate the API container with the compose files that started it, so it
+   starts with the new environment - `docker compose restart` keeps the old
+   one. In the `docker-compose.yml` stack:
+
+    ```bash
+    docker compose up -d app
+    ```
+
+    On a server, never run a bare `docker compose` in the clone: it merges
+    `docker-compose.override.yml` and replaces the server's API with a local
+    build. Name the deploy's files instead - add
+    `-f docker-compose-prod.traefik.yml` on a host deployed with
+    `PROXY=traefik`, or use `-f docker-compose-dev.yml` on the dev server:
+
+    ```bash
+    docker compose --env-file backend/.env -f docker-compose-prod.yml up -d app
+    ```
+
+    On a host [`scripts/deploy.sh`](../deploy.md#by-hand) deploys, put the image
+    tag it deployed in front of that command:
+    `AGENTICOS_VERSION="sha-$(git rev-parse HEAD | cut -c1-7)"`. The script
+    [pins the tag only while it runs](../deploy.md#the-images); without the
+    prefix, the command starts the version `backend/.env` names, or `latest`.
+
+4. Connect at the server's URL on that name - for example
+   `http://postgres-mcp:8000/mcp`, with the port and path its README gives. The
+   path has to match the server's transport: a `/sse` segment selects
+   server-sent events, anything else streamable HTTP.
+
+Three things hold for a listed host:
+
+- **It is matched exactly and not resolved.** The entry is the host exactly as
+  the URL spells it, and saving the connection does not look it up. The URL
+  still needs `http://` or `https://`.
+- **It is connected with a bearer token.** Sign-in (OAuth) is not offered for
+  a listed host, because the sign-in check ignores the list.
+- **It opens the whole host, to every account.** Every account on this
+  deployment can connect to any port on a listed host, so the server, or a
+  proxy in front of it, has to check the token. The read-only role still bounds
+  what anyone can read through it. See
+  [what a listed host opens](../mcp.md#what-a-listed-host-opens), and how to
+  undo an entry.
+
+A deployment that keeps the list empty can still reach a server through a
+routable address in front of it: a small host with a public IP, or a tunnel.
+
+The SQL above was run and checked directly against Postgres; the role refusal
+and the view totals quoted are real, and so is the URL refusal. What was not
+verified is the rest of this page: a listed server being connected, and an agent
+actually querying through it.
+
 ## Connect the server
 
 1. In an agent's **Toolbox → MCP servers**, choose **Connect a server** and
@@ -103,37 +194,14 @@ The reference answer, so you can check a reply against the source rows:
 2. Point the connection at your own running Postgres MCP server (for example
    [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp))
    configured with `shop_readonly`'s connection string and its restricted,
-   read-only mode. Paste the bearer token that server checks - not the
-   database password - as the connection's token.
+   read-only mode - `http://postgres-mcp:8000/mcp` once its host is listed.
+   Paste the bearer token that server checks - not the database password - as
+   the connection's token.
 3. On the agent's binding, narrow `allowed_tools` to the read-only ones the
    server exposes, on top of whatever the connection itself already allows.
 4. Bind only this connection, set a budget, and set instructions that name the
    two views and tell the agent to say when a question needs a column or a
    table the views do not carry, rather than guessing.
-
-## Why this could not be run here
-
-Connecting the server was attempted against this installation and refused:
-
-```text
-This MCP server URL cannot be used: Blocked: 'localhost' resolves to
-private/internal address '::1'. SSRF protection does not allow requests to
-internal networks.
-```
-
-An MCP connection's URL is refused unconditionally for any loopback, private,
-link-local or shared-CGNAT address - there is no local-development exception,
-because the same check also guards a `cdp_url` and every OAuth discovery hop.
-See [a URL this deployment must not reach is refused](../mcp.md#a-connection).
-A Postgres MCP server reachable only on `localhost` or a private network
-address - the ordinary place to first run one - cannot be connected from this
-deployment's own machine. Reaching it needs a routable address: a small host
-with a public or VPN-reachable IP, or a tunnel, in front of the server.
-
-The SQL above was run and checked directly against Postgres; the role refusal
-and the view totals quoted are real. What was not verified is an agent
-actually querying through the connected server, because the server was never
-reachable to connect.
 
 ## Check the result
 
@@ -148,8 +216,14 @@ reachable to connect.
 ## When it goes wrong
 
 - **The connection is refused with an SSRF message.** The server's address is
-  loopback, private or otherwise internal to this deployment's own network -
-  see above. Put a routable address in front of it.
+  loopback, private or otherwise internal to this deployment's own network. Add
+  its host to `MCP_ALLOWED_HOSTS` exactly as the URL spells it, recreate the API
+  container and save the connection again - see
+  [above](#let-the-deployment-reach-a-server-on-its-own-network) - or put a
+  routable address in front of it.
+- **Sign-in is not offered, or starting OAuth is refused, for a listed host.**
+  That is expected: the sign-in check never reads the list. Connect with the
+  bearer token the server checks.
 - **The agent reads the base table instead of the views.** `shop_readonly` was
   granted on `public` as well as `reporting`, or the base table's schema was
   never revoked from it. Re-run the `REVOKE` above.

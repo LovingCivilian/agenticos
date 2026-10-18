@@ -1,5 +1,5 @@
 ---
-source_sha: "351588808d86"
+source_sha: "4127fd6b43f9"
 title: "Responde preguntas desde tu base de datos"
 description: "Conecta un servidor MCP de Postgres autoalojado, detrás de un rol de solo lectura y un esquema de solo vistas, y deja que un agent lo consulte."
 ---
@@ -9,10 +9,8 @@ description: "Conecta un servidor MCP de Postgres autoalojado, detrás de un rol
 Conecta un servidor MCP de Postgres para que un agent pueda responder
 preguntas desde tu propia base de datos, y pon un rol de solo lectura y un
 esquema de solo vistas entre el agent y tus tablas antes de hacerlo. Es un
-procedimiento que ejecutar, no un informe de un despliegue medido: el
-servidor MCP que necesita esta receta no se puede alcanzar desde esta
-instalación, por un motivo que se explica más abajo, así que nada de esto se
-ejecutó de principio a fin contra un agent real.
+procedimiento que ejecutar, no un informe de un despliegue medido: nada de
+esto se ejecutó de principio a fin contra un agent real.
 
 ## Qué necesitas { #what-you-need }
 
@@ -23,6 +21,10 @@ ejecutó de principio a fin contra un agent real.
   propio servidor*, y una advertencia de apuntarlo a vistas de solo lectura en
   lugar de a una base primaria con acceso de escritura. Ver
   [el catálogo](../mcp.md#data-and-analytics).
+- Para un servidor en la propia red de este deployment — un servicio de
+  compose, una dirección privada —, su host en
+  [`MCP_ALLOWED_HOSTS`](../configuration.md#project-settings). Ver
+  [más abajo](#let-the-deployment-reach-a-server-on-its-own-network).
 - `connections:manage`, para registrar la conexión de organización.
 
 ## Por qué un rol de solo lectura y un esquema de solo vistas { #why-a-read-only-role-and-a-views-only-schema }
@@ -102,6 +104,102 @@ pending 1 / 2500, refunded 1 / 4200. `shop_readonly` consultando `orders`
 directamente se rechaza con `permission denied for table orders` — las
 vistas son la única puerta.
 
+## Deja que el deployment alcance un servidor de su propia red { #let-the-deployment-reach-a-server-on-its-own-network }
+
+La URL de una conexión MCP se rechaza al guardarla si su host resuelve a una
+dirección loopback, privada, link-local o de CGNAT compartido. Ver
+[una URL que este deployment no debe alcanzar se rechaza](../mcp.md#a-connection).
+Conectar un servidor en `localhost` responde:
+
+```text
+This MCP server URL cannot be used: Blocked: 'localhost' resolves to
+private/internal address '::1'. SSRF protection does not allow requests to
+internal networks.
+```
+
+Un servidor en la propia red del deployment — el sitio habitual donde se
+ejecuta uno por primera vez — se rechaza igual hasta que el operador incluye
+su host en la lista, con su propio nombre y nunca `localhost`, una dirección
+de loopback ni la máquina en la que se ejecuta el stack:
+
+1. Ejecuta el servidor con un nombre como `postgres-mcp`, en una red que
+   compartan la API y el runner de Prefect, para que ambos lo alcancen por ese
+   nombre: en el stack de `docker-compose.yml`, como un servicio en su red
+   `backend`. Toma su imagen y sus flags de arranque del README del propio
+   servidor, pero no publiques ningún puerto, aunque el README lo haga: un
+   puerto publicado permite llamarlo desde fuera, sin pasar por la API. Lee
+   [qué puede alcanzar](../mcp.md#what-a-listed-host-opens) antes de elegir una
+   imagen.
+
+    En un servidor, ejecútalo desde un archivo de compose y un proyecto (`-p`)
+    propios que se unan a la red del stack como `external: true`, igual que
+    [hace el frontend de producción](../deploy.md#option-b-nginx):
+    `agenticos_edge` para `docker-compose-prod.yml`, `agenticos_backend` en el
+    servidor de desarrollo. No edites en su lugar un archivo de compose
+    versionado: eso puede detener el checkout del siguiente despliegue.
+
+2. Pon el host en `backend/.env`, como una lista JSON:
+
+    ```bash
+    MCP_ALLOWED_HOSTS=["postgres-mcp"]
+    ```
+
+3. Vuelve a crear el contenedor de la API con los archivos de compose que lo
+   arrancaron, para que arranque con el nuevo entorno —
+   `docker compose restart` conserva el antiguo. En el stack de
+   `docker-compose.yml`:
+
+    ```bash
+    docker compose up -d app
+    ```
+
+    En un servidor, nunca ejecutes un `docker compose` a secas en el clon:
+    fusiona `docker-compose.override.yml` y sustituye la API del servidor por
+    un build local. Nombra en su lugar los archivos del despliegue — añade
+    `-f docker-compose-prod.traefik.yml` en un host desplegado con
+    `PROXY=traefik`, o usa `-f docker-compose-dev.yml` en el servidor de
+    desarrollo:
+
+    ```bash
+    docker compose --env-file backend/.env -f docker-compose-prod.yml up -d app
+    ```
+
+    En un host que despliega [`scripts/deploy.sh`](../deploy.md#by-hand), pon
+    delante de ese comando el tag de imagen que desplegó el script:
+    `AGENTICOS_VERSION="sha-$(git rev-parse HEAD | cut -c1-7)"`. El script
+    [lo fija solo mientras se ejecuta](../deploy.md#the-images); sin él, el
+    comando arranca la versión que nombra `backend/.env`, o `latest`.
+
+4. Conecta en la URL del servidor con ese nombre — por ejemplo
+   `http://postgres-mcp:8000/mcp`, con el puerto y la ruta que da su README.
+   La ruta tiene que coincidir con el transporte del servidor: un segmento
+   `/sse` selecciona server-sent events, cualquier otra cosa HTTP en
+   streaming.
+
+Para un host de la lista valen tres cosas:
+
+- **Se compara de forma exacta y no se resuelve.** La entrada es el host tal
+  como lo escribe la URL, y guardar la conexión no lo busca en DNS. La URL
+  sigue necesitando `http://` o `https://`.
+- **Se conecta con un token de portador.** El inicio de sesión (OAuth) no se
+  ofrece para un host de la lista, porque la comprobación del inicio de sesión
+  ignora la lista.
+- **Abre el host entero, a todas las cuentas.** Cualquier cuenta de este
+  deployment puede conectarse a cualquier puerto de un host de la lista, así
+  que el servidor, o un proxy delante de él, tiene que comprobar el token. El
+  rol de solo lectura sigue acotando lo que cualquiera puede leer a través de
+  él. Ver [qué abre un host de la lista](../mcp.md#what-a-listed-host-opens), y
+  cómo deshacer una entrada.
+
+Un deployment que deja la lista vacía todavía puede alcanzar un servidor a
+través de una dirección enrutable delante de él: un host pequeño con una IP
+pública, o un túnel.
+
+El SQL de arriba se ejecutó y se comprobó directamente contra Postgres; el
+rechazo del rol, los totales de las vistas citados y el rechazo de la URL son
+reales. Lo que no se verificó es el resto de esta página: que se conecte un
+servidor de la lista, y que un agent consulte de verdad a través de él.
+
 ## Conecta el servidor { #connect-the-server }
 
 1. En **Toolbox → MCP servers** de un agent, elige **Connect a server** y
@@ -111,7 +209,8 @@ vistas son la única puerta.
 2. Apunta la conexión a tu propio servidor MCP de Postgres en marcha (por
    ejemplo [`crystaldba/postgres-mcp`](https://github.com/crystaldba/postgres-mcp))
    configurado con la cadena de conexión de `shop_readonly` y su modo
-   restringido de solo lectura. Pega el token de portador que comprueba ese
+   restringido de solo lectura — `http://postgres-mcp:8000/mcp` una vez que
+   su host esté en la lista. Pega el token de portador que comprueba ese
    servidor — no la contraseña de la base de datos — como el token de la
    conexión.
 3. En la vinculación del agent, reduce `allowed_tools` a las de solo lectura
@@ -121,32 +220,6 @@ vistas son la única puerta.
    nombren las dos vistas y le digan al agent que diga cuándo una pregunta
    necesita una columna o una tabla que las vistas no tienen, en vez de
    adivinar.
-
-## Por qué esto no se pudo ejecutar aquí { #why-this-could-not-be-run-here }
-
-Conectar el servidor se intentó contra esta instalación y se rechazó:
-
-```text
-This MCP server URL cannot be used: Blocked: 'localhost' resolves to
-private/internal address '::1'. SSRF protection does not allow requests to
-internal networks.
-```
-
-La URL de una conexión MCP se rechaza incondicionalmente para cualquier
-dirección loopback, privada, link-local o de CGNAT compartido — no hay
-excepción para desarrollo local, porque la misma comprobación también
-protege una `cdp_url` y cada salto de descubrimiento OAuth. Ver
-[una URL que este deployment no debe alcanzar se rechaza](../mcp.md#a-connection).
-Un servidor MCP de Postgres alcanzable solo en `localhost` o en una dirección
-de red privada — el sitio habitual donde se ejecuta uno por primera vez — no
-se puede conectar desde la propia máquina de este deployment. Alcanzarlo
-necesita una dirección enrutable: un host pequeño con una IP pública o
-alcanzable por VPN, o un túnel, delante del servidor.
-
-El SQL de arriba se ejecutó y se comprobó directamente contra Postgres; el
-rechazo del rol y los totales de las vistas citados son reales. Lo que no se
-verificó es un agent consultando de verdad a través del servidor conectado,
-porque el servidor nunca fue alcanzable para conectarlo.
 
 ## Comprueba el resultado { #check-the-result }
 
@@ -162,7 +235,13 @@ porque el servidor nunca fue alcanzable para conectarlo.
 
 - **La conexión se rechaza con un mensaje de SSRF.** La dirección del
   servidor es loopback, privada o de otro modo interna a la propia red de
-  este deployment — ver arriba. Pon una dirección enrutable delante de él.
+  este deployment. Añade su host a `MCP_ALLOWED_HOSTS` tal como lo escribe la
+  URL, vuelve a crear el contenedor de la API y guarda la conexión otra vez —
+  ver [más arriba](#let-the-deployment-reach-a-server-on-its-own-network) —, o pon una dirección enrutable delante de él.
+- **No se ofrece el inicio de sesión, o se rechaza iniciar OAuth, para un
+  host de la lista.** Es lo esperado: la comprobación del inicio de
+  sesión nunca lee la lista. Conéctate con el token de portador que comprueba
+  el servidor.
 - **El agent lee la tabla base en vez de las vistas.** A `shop_readonly` se
   le concedió acceso sobre `public` además de `reporting`, o el esquema de
   la tabla base nunca se le revocó. Vuelve a ejecutar el `REVOKE` de arriba.

@@ -1,5 +1,5 @@
 ---
-source_sha: "3409285bde3b"
+source_sha: "398a189cf08d"
 ---
 
 # MCP — die Tools, die hier niemand schreiben muss { #mcp-the-tools-nobody-here-has-to-write }
@@ -34,7 +34,7 @@ konfigurieren wäre.
 | | |
 |---|---|
 | `name` | Zugleich das Tool-Präfix. Siehe [Namenskollisionen](#name-collisions) |
-| `url` | Gegen SSRF geprüft, bevor wir sie überhaupt anfragen |
+| `url` | Gegen SSRF geprüft, bevor wir sie überhaupt anfragen. Ein Host in [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) des Deployments überspringt die Adressprüfung, nicht den Rest |
 | `auth_token` | Im [Vault](secrets.md) versiegelt, von keinem Endpunkt je zurückgegeben |
 | `allowed_tools` | Eine Allowlist, oder null für „alles, was der Server anbietet“. Ein Binding grenzt darin weiter ein — siehe unten |
 | `is_enabled` | Aus, ohne die Zugangsdaten zu verlieren |
@@ -60,6 +60,56 @@ konfigurieren wäre.
     ([#861](https://github.com/vstorm-co/agenticos/issues/861)) — selbst zu hosten
     und eine `localhost`-URL einzufügen ist der gewöhnliche Fall, nicht der
     exotische.
+
+    Der einzige Weg daran vorbei gehört dem Betreiber: Ein Host, der in
+    [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) steht, wird beim
+    Anlegen oder Bearbeiten einer Connection weder gegen diese Bereiche geprüft
+    noch aufgelöst. Sein Schema, sein Userinfo-Teil und sein Port werden
+    weiterhin geprüft. Einen OAuth-Flow gegen einen gelisteten Host zu starten
+    oder zu fragen, ob er eine Anmeldung anbietet, wird weiterhin abgelehnt - ein
+    solcher Server wird mit einem Bearer-Token verbunden oder ganz ohne. Lesen
+    Sie, [was ein gelisteter Host öffnet](#what-a-listed-host-opens), bevor Sie
+    einen eintragen.
+
+### Was ein gelisteter Host öffnet { #what-a-listed-host-opens }
+
+Mit einem Eintrag in [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings)
+bürgt der Betreiber für alles, worauf dieser Name auflöst - gegenüber jedem
+Konto im Deployment. Bevor Sie einen eintragen, sollten Sie wissen, was er
+öffnet:
+
+- **Den ganzen Host.** Abgeglichen wird nur der Host, also ist jeder Port und
+  jeder Pfad darauf erreichbar. Tragen Sie nur einen Namen ein, unter dem allein
+  der MCP-Server antwortet. Tragen Sie nie ein Loopback ein (`localhost`,
+  `127.0.0.1`, `::1`), nicht die Maschine, auf der der Stack läuft (ihre
+  Adresse, das Gateway eines Docker-Netzes, `host.docker.internal`), und keinen
+  Namen, unter dem einer der eigenen Dienste dieses Stacks antwortet: `app` und
+  sein Alias `backend`, `db`, `redis`, `prefect-server`, `sandboxd` oder
+  irgendein anderer Dienst aus seinen compose-Dateien.
+- **Was er erreicht.** Ein Server im Netz des Stacks erreicht die API des
+  Prefect-Servers, die keine Authentifizierung verlangt, und die API und das
+  Frontend am Reverse Proxy vorbei; auf dem Dev-Server und im Stack aus
+  `docker-compose.yml` auch jeden Dienst in dessen Netz `backend`, darunter die
+  Datenbank, Redis und `sandboxd`. Seine Tools handeln für
+  jedes Konto: Betreiben Sie nur ein Image, dem Sie vertrauen, und keinen
+  Server, dessen Tools eine Adresse abrufen, die der Aufrufer wählt.
+- **Jedes Konto.** Die Liste gilt für das ganze Deployment. Jedes Konto kann
+  eine persönliche Connection zu einem gelisteten Host speichern - unter der
+  standardmäßigen [offenen Registrierung](deployment.md#who-may-register) jeder,
+  der sich registriert - und jeder Inhaber von `mcp:manage` eine
+  Organisations-Connection. Tragen Sie nur einen Server ein, der für jeden
+  Aufrufer ein Bearer-Token prüft, oder einen, dessen Tools für jeden
+  unbedenklich sind, der sich anmelden kann.
+- **Bis die Connection gelöscht ist.** Die Adresse wird nur geprüft, wenn die
+  URL einer Connection gespeichert wird. Einen Eintrag zu entfernen trennt keine
+  gespeicherte Connection, und eine deaktivierte wieder zu aktivieren wird nicht
+  erneut geprüft - löschen Sie diese Connections also. Für eine persönliche
+  Connection gibt es keine Admin-Route: Löschen kann sie ihr Besitzer, oder Sie
+  löschen ihre Zeile in der Datenbank. `agenticos cmd data-protection-report`
+  listet den Endpoint jeder aktivierten Connection; eine deaktivierte finden Sie
+  über ihre `url` in der Tabelle `mcp_connections`. Eine URL wird so
+  gespeichert, wie sie eingegeben wurde: Vergleichen Sie den Host ohne
+  Rücksicht auf Groß- und Kleinschreibung (`ILIKE`).
 
 ### Persönlich oder organisationsweit { #personal-or-organization-wide }
 
@@ -374,6 +424,11 @@ Token-Endpunkt, der Registrierungs-Endpunkt und jede Weiterleitung danach werden
 von den Discovery-Dokumenten des entfernten Servers benannt. Niemand in Ihrer
 Organisation musste der Angreifer sein.
 
+[`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) reicht nicht in diesen
+Flow: Der gepinnte Client prüft jede Anfrage ohne die Liste, ein
+Discovery-Dokument erreicht also keine interne Adresse, indem es einen gelisteten
+Host nennt.
+
 Weiterleitungen werden Hop für Hop verfolgt, auf fünf begrenzt, jede mit ihrer
 eigenen Prüfung. Eine `302` auf einen neuen Host wird neu aufgelöst, nicht
 vertraut.
@@ -390,7 +445,9 @@ Zwei Ränder bleiben, beide schmal und beide gewollt:
   selbst auflöst. Es gibt nichts zu pinnen.
 - Die **eigene URL der Connection** wird beim Speichern geprüft und erneut
   aufgelöst, wenn ein Agent läuft — vom Betreiber getippt, sie neu zu binden
-  heißt also, der Betreiber zu sein.
+  heißt also, der Betreiber zu sein. Ein Host in `MCP_ALLOWED_HOSTS` wird
+  überhaupt nicht gegen Adressbereiche geprüft (siehe
+  [was ein gelisteter Host öffnet](#what-a-listed-host-opens)).
 
 Nichts, was ein *Modell* wählt, erreicht diese Prüfung überhaupt, und das soll auch
 so sein: Eine URL, die ein Agent ausgewählt hat, gehört zu Pydantic AIs

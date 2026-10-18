@@ -1,5 +1,5 @@
 ---
-source_sha: "3409285bde3b"
+source_sha: "398a189cf08d"
 ---
 
 # MCP — las herramientas que aquí nadie tiene que escribir { #mcp-the-tools-nobody-here-has-to-write }
@@ -33,7 +33,7 @@ Atlassian funciona junto a uno de HTTP en streaming sin nada que configurar.
 | | |
 |---|---|
 | `name` | También el prefijo de las herramientas. Ver [Colisiones de nombres](#name-collisions) |
-| `url` | Validada contra SSRF antes de que lleguemos a pedirla |
+| `url` | Validada contra SSRF antes de que lleguemos a pedirla. Un host en el [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) del despliegue se salta la comprobación de dirección, no el resto |
 | `auth_token` | Sellado en el [vault](secrets.md), nunca devuelto por ningún endpoint |
 | `allowed_tools` | Una lista de permitidos, o null para «todo lo que ofrezca el servidor». Una vinculación estrecha dentro de ella — ver más abajo |
 | `is_enabled` | Apagarla sin perder la credencial |
@@ -58,6 +58,54 @@ Atlassian funciona junto a uno de HTTP en streaming sin nada que configurar.
     la plataforma se rompe y no como una dirección que corregir
     ([#861](https://github.com/vstorm-co/agenticos/issues/861)) — auto-alojar y
     pegar una URL de `localhost` es el caso ordinario, no el exótico.
+
+    La única forma de pasar es la del operador: un host incluido en
+    [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) no se comprueba
+    contra esos rangos, ni se resuelve, al crear o editar una conexión. Su
+    esquema, su userinfo y su puerto sí se siguen comprobando. Iniciar un flujo
+    OAuth contra un host de la lista, o preguntar si ofrece inicio de sesión, se
+    sigue rechazando - un servidor así se conecta con un bearer token, o sin
+    ninguno. Lee [qué abre un host de la lista](#what-a-listed-host-opens)
+    antes de añadir uno.
+
+### Qué abre un host de la lista { #what-a-listed-host-opens }
+
+Con una entrada en [`MCP_ALLOWED_HOSTS`](configuration.md#project-settings), el
+operador responde por todo aquello a lo que resuelva ese nombre, ante todas las
+cuentas del despliegue. Antes de añadir una, ten claro lo que abre:
+
+- **El host entero.** La coincidencia es solo sobre el host, así que cualquier
+  puerto y cualquier ruta en él quedan alcanzables. Pon solo un nombre al que
+  responda únicamente el servidor MCP. Nunca pongas un loopback (`localhost`,
+  `127.0.0.1`, `::1`), la máquina en la que se ejecuta el stack (su dirección,
+  la puerta de enlace de una red de Docker, `host.docker.internal`) ni un nombre
+  al que responda uno de los servicios propios de este stack: `app` y su alias
+  `backend`, `db`, `redis`, `prefect-server`, `sandboxd`, o cualquier otro
+  servicio de sus archivos de compose.
+- **Qué alcanza.** Un servidor en la red del stack alcanza la API sin
+  autenticación del servidor de Prefect, y la API y el frontend sin pasar por el
+  proxy inverso; en el servidor de desarrollo y en el stack de
+  `docker-compose.yml`, también cualquier servicio de su red `backend`, entre
+  ellos la base de datos, Redis y `sandboxd`. Sus herramientas
+  actúan en nombre de todas las cuentas: ejecuta solo una imagen en la que
+  confíes, y ningún servidor cuyas herramientas hagan peticiones a una dirección
+  que elija el llamante.
+- **Todas las cuentas.** La lista vale para todo el despliegue. Cualquier cuenta
+  puede guardar una conexión personal a un host de la lista - con el
+  [registro abierto](deployment.md#who-may-register) por defecto, cualquiera que
+  se registre - y cualquier titular de `mcp:manage`, una de su
+  organización. Pon solo un servidor que compruebe un bearer token de cada
+  llamante, o cuyas herramientas sean seguras para cualquiera que pueda iniciar
+  sesión.
+- **Hasta que se elimine la conexión.** La dirección solo se comprueba cuando se
+  guarda la URL de una conexión. Quitar una entrada no desconecta una conexión
+  guardada, y volver a activar una desactivada no se comprueba de nuevo, así que
+  elimina esas conexiones. Una conexión personal no tiene ruta de administración:
+  la elimina su propietario, o tú eliminas su fila en la base de datos.
+  `agenticos cmd data-protection-report` lista el endpoint de cada conexión
+  activada; una desactivada se busca por su `url` en la tabla
+  `mcp_connections`. La URL se guarda tal como se escribió, así que compara el
+  host sin distinguir mayúsculas de minúsculas (`ILIKE`).
 
 ### Personal o de toda la organización { #personal-or-organization-wide }
 
@@ -370,6 +418,11 @@ autorización, el endpoint de token, el endpoint de registro y cada redirección
 posterior los nombran los propios documentos de descubrimiento del servidor
 remoto. Nadie de tu organización tenía que ser el atacante.
 
+[`MCP_ALLOWED_HOSTS`](configuration.md#project-settings) no llega a este flujo:
+el cliente fijado comprueba cada petición sin la lista, así que un documento de
+descubrimiento no puede alcanzar una dirección interna nombrando un host de la
+lista.
+
 Las redirecciones se siguen de salto en salto, con un límite de cinco, cada una
 con su propia comprobación. Un `302` a un host nuevo se vuelve a resolver, no se
 confía en él.
@@ -386,7 +439,9 @@ Quedan dos bordes, ambos estrechos y ambos deliberados:
   alguien, que la resuelve por su cuenta. No hay nada que fijar.
 - La **URL propia de la conexión** se comprueba al guardar y se resuelve otra vez
   cuando un agent se ejecuta — la escribe un operador, así que volver a apuntarla
-  significa ser el operador.
+  significa ser el operador. Un host en `MCP_ALLOWED_HOSTS` no se comprueba
+  contra ningún rango de direcciones (ver
+  [qué abre un host de la lista](#what-a-listed-host-opens)).
 
 Nada que elija un *modelo* llega a esta comprobación, y nada debería: una URL
 elegida por un agent quiere el `safe_download` de Pydantic AI.
