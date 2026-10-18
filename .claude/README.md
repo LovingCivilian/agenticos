@@ -63,6 +63,7 @@ nothing until one is relevant.
 | `frontend-feature` | Pages, data layer, stores, i18n, permission-hiding |
 | `project-docs` | The mkdocs site, diagrams, icons, `--strict` |
 | `dev-agent` | Stacked dev/design branches, a merged design PR gate, then local tests → review → implement → review |
+| `fork-sync` | Syncing this fork with upstream: the mirror `main`, merging into `develop`, and every conflict or overlap as the user's choice |
 | `pr-comments` | Fetching and systematically addressing PR review threads |
 | `pr-description` | Writing a consistent, structured PR description from a diff |
 | `resolve-changelog-conflict` | A `CHANGELOG.md` merge conflict, detecting this repo's own entry format |

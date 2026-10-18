@@ -264,6 +264,9 @@ retranslated is how a stale translation stops being visible.
 
 - Never commit on `main`. Use a feature or fix branch, one PR per coherent change,
   squashed on merge.
+- This checkout is a fork: `main` mirrors upstream and `develop` holds the fork's
+  work. Branch from `develop`, record changes in `CHANGELOG.fork.md`, and sync with
+  the `fork-sync` skill, whose sync PRs merge with a merge commit, never squashed.
 - On a branch, commit and push each finished, verified piece without being asked.
   This is the project's exception to the global commit-on-request preference;
   explicit session instructions still take precedence.
