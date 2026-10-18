@@ -544,6 +544,17 @@ def build(args: argparse.Namespace) -> dict:
     return report
 
 
+def quoted(text: str, limit: int = 160) -> str:
+    """Upstream-written text (commit subjects, changelog leads, PR titles) as inert data.
+
+    Collapsed to one line, backticks and markdown emphasis removed, cut to `limit`,
+    and wrapped in quotes, so a crafted commit message cannot pose as a heading, a
+    code block or an instruction in the summary.
+    """
+    flat = " ".join(re.sub(r"[`*_#<>\[\]]", "", text).split())
+    return f"\u201c{flat[:limit]}\u201d"
+
+
 def plural(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
@@ -586,7 +597,7 @@ def markdown(report: dict) -> str:
         )
     rows.append(
         f"- **Upstream commits to take:** {w['upstream_commits_to_take']} "
-        f"(releases: {', '.join(w['upstream_releases_to_take']) or 'none'})"
+        f"(releases: {', '.join(map(quoted, w['upstream_releases_to_take'])) or 'none'})"
     )
     rows.append(
         f"- **Our commits:** {len(w['fork_only_commits'])}; already in upstream by patch: {len(w['already_upstream'])}"
@@ -606,7 +617,7 @@ def markdown(report: dict) -> str:
     for hit in report["collisions"]:
         rows.append(
             f"- **Possible duplicate of our work:** `{hit['identifier']}` (ours in {hit['ours_in']}) "
-            f"appears upstream: {hit['upstream_commit'] or hit['upstream_line']}"
+            f"appears upstream: {quoted(hit['upstream_commit'] or hit['upstream_line'])}"
         )
     intent = report["intent"]
     if intent["upstream_new_changelog_entries"] and intent["ours"]:
@@ -614,7 +625,7 @@ def markdown(report: dict) -> str:
             "- **Compare by intent** (upstream may have built one of ours under other names):"
         )
         rows.append(
-            f"  - upstream's new entries: {'; '.join(intent['upstream_new_changelog_entries'])}"
+            f"  - upstream's new entries: {'; '.join(map(quoted, intent['upstream_new_changelog_entries']))}"
         )
         rows.append(f"  - our unreleased entries: {'; '.join(intent['ours'])}")
     for pair in report["migrations"]["same_parent"]:
