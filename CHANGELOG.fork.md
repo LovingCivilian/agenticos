@@ -22,6 +22,10 @@ such as LibreWolf and ungoogled-chromium.
 
 ## [Unreleased]
 
+## [1.6.1-1] - 2026-10-19
+
+Based on upstream [1.6.1](CHANGELOG.md).
+
 ### Added
 
 - **`MCP_ALLOWED_HOSTS`, for an MCP server on the deployment's own network**
