@@ -25,6 +25,13 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+## [1.7.0-1] - 2026-10-19
+
+Based on upstream [1.7.0](CHANGELOG.md).
+
+This release has no new fork changes. It moves the fork from upstream 1.6.1
+to upstream 1.7.0 (#12).
+
 ## [1.6.1-3] - 2026-10-19
 
 Based on upstream [1.6.1](CHANGELOG.md).
