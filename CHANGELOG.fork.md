@@ -25,6 +25,15 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+### Added
+
+- **A server's own compose settings, outside git** (#10). A server can now
+  keep its own overlay beside `backend/.env`: `docker-compose-prod.local.yml`
+  for the backend and `docker-compose-prod.frontend.local.yml` for the
+  frontend. `make prod` and the other prod targets add the file last when it
+  exists, so its settings win. Use it for one host's settings, for example an
+  external Docker network that an MCP server is on. Do not commit the file.
+
 ## [1.6.1-2] - 2026-10-19
 
 Based on upstream [1.6.1](CHANGELOG.md).
