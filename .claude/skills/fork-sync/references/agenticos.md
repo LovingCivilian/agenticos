@@ -140,25 +140,28 @@ header:
 ```markdown
 # Fork changelog
 
-Changes this fork, `LovingCivilian/agenticos`, carries on top of upstream
-[AgenticOS](https://github.com/vstorm-co/agenticos). Upstream's own changes are
-in [`CHANGELOG.md`](CHANGELOG.md), which this fork keeps identical to upstream's
-so a sync never conflicts there. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), like upstream's.
+This file records the changes that this fork, `LovingCivilian/agenticos`, adds
+to upstream [AgenticOS](https://github.com/vstorm-co/agenticos). Upstream
+records its own changes in [`CHANGELOG.md`](CHANGELOG.md). This fork keeps that
+file identical to the upstream file, so a sync never has a conflict there. The
+format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), the
+same as upstream.
 
-A version is `<upstream version>-<revision>`: the upstream release the fork is
-built on, then this fork's revision on top of it, restarting at 1 whenever the
-upstream base changes. `1.5.0-2` reads "upstream 1.5.0, fork revision 2". This
-is the convention Debian packages follow (`deb-version(7)`), and so do forks
-such as LibreWolf and ungoogled-chromium.
+A version has the form `<upstream version>-<revision>`. The first part is the
+upstream release that the fork builds on. The second part is the fork revision
+on that release. The revision starts again at 1 when the upstream base changes.
+For example, `1.5.0-2` means "upstream 1.5.0, fork revision 2". Debian packages
+use this convention (`deb-version(7)`), and so do forks such as LibreWolf and
+ungoogled-chromium.
 
-- Each release is `## [<version>] - YYYY-MM-DD`, dated the day it is cut, and
-  opens with the upstream release it is built on. `[Unreleased]` has no date
-  until then.
-- A release is tagged `fork/<version>`, never `v*`, which is upstream's.
+- Each release has the heading `## [<version>] - YYYY-MM-DD`, with the date of
+  the cut. Its first line names the upstream release that it builds on.
+  `[Unreleased]` has no date until the cut.
+- The tag of a release is `fork/<version>`, never `v*`. The `v*` tags belong to
+  upstream.
 - `backend/pyproject.toml`, `backend/uv.lock` and `frontend/package.json` keep
-  upstream's version, so a fork build reports the upstream release it is built
-  on.
+  the upstream version. Thus a fork build reports the upstream release that it
+  builds on.
 
 ## [Unreleased]
 ```
