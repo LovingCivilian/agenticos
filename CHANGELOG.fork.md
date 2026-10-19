@@ -25,6 +25,10 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+## [1.6.1-2] - 2026-10-19
+
+Based on upstream [1.6.1](CHANGELOG.md).
+
 ### Added
 
 - **The fork's own images, deployed with `make prod`** (#8). Upstream
