@@ -59,7 +59,8 @@ publish from the fork: `images.yml` (pushes to `ghcr.io/vstorm-co/...`),
 `deploy.yml` (needs `DEPLOY_SSH_KEY`), `deploy-queue.yml`, `docs.yml` (GitHub
 Pages), `dependency-freshness.yml`. Kept: `ci.yml`, `codeql.yml`, and
 `ai-review.yml`, which runs on manual dispatch only until upstream restores its
-`pull_request` trigger (its label gate returns with it). Check the live state with
+`pull_request` trigger (its label gate returns with it). Fork-only:
+`fork-images.yml`, which publishes the fork's images (see below). Check the live state with
 `gh api repos/LovingCivilian/agenticos/actions/workflows -q '.workflows[] | "\(.state) \(.path)"'`.
 The report shows it as `fork_workflows`.
 
@@ -73,20 +74,25 @@ before suspecting the code.
 ## Deploying the fork
 
 Upstream's CI publishes images of upstream's code only, and `images.yml` is
-disabled here, so a fork server builds its own:
+disabled here. So the fork publishes its own, and a fork server runs them the
+way upstream's manual deploy runs upstream's:
 
-- `scripts/fork-deploy.sh <commit-or-tag>`, copied to the server and run there
-  the way `docs/deploy.md` runs `scripts/deploy.sh`. It builds
-  `agenticos-fork-backend` and `agenticos-fork-frontend` from that commit,
-  starts them through `docker-compose-prod.fork.yml` and
-  `docker-compose-prod.frontend.fork.yml`, tags them `latest` once healthy, and
-  keeps the last two builds.
-- The server checkout's `origin` is this fork, and only a commit that has both
-  overlays can be deployed.
-- `make prod`, `make prod-frontend` and `scripts/deploy.sh` run upstream's
-  images, without the fork's changes. Never run them on a fork server.
-- `sandboxd` is upstream's published image; nothing in this repository builds
-  it.
+- **Build:** pushing a `fork/<version>` tag runs `fork-images.yml`. It
+  publishes `ghcr.io/lovingcivilian/agenticos-{backend,frontend}` as
+  `<version>`, `sha-<short>` and `latest`, for `linux/amd64`. A manual run
+  (`gh workflow run fork-images.yml --ref <branch>`) publishes `sha-<short>`
+  only.
+- **Image names:** `docker-compose-prod.fork.yml` and
+  `docker-compose-prod.frontend.fork.yml` replace upstream's image names with
+  these. `GNUmakefile` includes upstream's `Makefile` and adds the overlays to
+  `make prod`, `make prod-frontend`, `make prod-down` and `make prod-logs`.
+- **Deploy, on the server:** check out the release tag, set
+  `AGENTICOS_VERSION=<version>` in `backend/.env`, then `make prod` and
+  `make prod-frontend`. The checkout's `origin` is this fork.
+- **Never on a fork server:** `scripts/deploy.sh`, which waits for and pulls
+  `ghcr.io/vstorm-co` images, and `make -f Makefile prod`, which skips
+  `GNUmakefile`.
+- **Not built here:** `sandboxd` stays upstream's published image.
 
 ## Checks to run after a merge
 
@@ -102,8 +108,8 @@ Never `make check`, `make test` or a whole-directory pytest on this machine
 | `docs/mcp.md` and the other guide pages | `python3 scripts/gen_architect_guide.py --check` (re-run it without `--check` to rewrite the copies) |
 | `docs/assets/amigo.svg` | `python3 scripts/gen_amigo_assets.py --check` |
 | frontend | `cd frontend && bunx vitest run <files>`, `make lint-frontend` |
-| `scripts/deploy.sh` | port the change into `scripts/fork-deploy.sh`, which copies its proxy, sandbox, retry and health logic (`tests/test_fork_deploy.py` fails until it matches); `uvx --from shellcheck-py shellcheck scripts/fork-deploy.sh` |
-| `docker-compose-prod*.yml` | a backend service that now runs `agenticos-backend` needs an entry in `docker-compose-prod.fork.yml`, and the frontend's in `docker-compose-prod.frontend.fork.yml` (`tests/test_fork_deploy.py` fails until it has one) |
+| `docker-compose-prod*.yml`, `Makefile` | `cd backend && uv run pytest tests/test_fork_deploy.py -q`. A new service on upstream's backend or frontend image needs an entry in its `*.fork.yml` overlay, and a renamed `PROD_FILES` or `PROD_FRONTEND_FILES` needs `GNUmakefile` updated |
+| `images.yml` | compare its build contexts and Dockerfiles with `fork-images.yml` |
 
 CI on the pushed commit is what proves the rest. Read it with `gh run list
 --repo LovingCivilian/agenticos --branch <branch>`, and use `gh run view <id>
@@ -202,7 +208,9 @@ do. Categories: `### Added`, `### Changed`, `### Fixed`, `### Removed`,
    as its first line. Put a fresh, empty `## [Unreleased]` above it.
 3. Open a PR into `develop`, and ask the user to merge it.
 4. Tag the merge commit, after asking:
-   `git tag fork/<version> <merge-sha>`, then push it over SSH.
+   `git tag fork/<version> <merge-sha>`, then push it over SSH. The push starts
+   `fork-images.yml`, which publishes that version's images; watch it with
+   `gh run list --repo LovingCivilian/agenticos --workflow fork-images.yml`.
 5. Optionally, after asking:
    `gh release create fork/<version> --repo LovingCivilian/agenticos --title "<version>" --notes-file <that section>`.
 

@@ -1,29 +1,18 @@
-# This fork's backend image instead of upstream's. An overlay, fork-only:
+# This fork's backend image instead of upstream's. Fork-only overlay, which
+# `GNUmakefile` adds to `make prod`, `make prod-down` and `make prod-logs`.
 #
-#   docker compose --env-file backend/.env \
-#     -f docker-compose-prod.yml -f docker-compose-prod.fork.yml up -d
+# `.github/workflows/fork-images.yml` builds the image from a `fork/*` tag and
+# publishes it as `ghcr.io/lovingcivilian/agenticos-backend:<version>`.
+# `AGENTICOS_VERSION` in `backend/.env` picks the version, as it does for
+# upstream's image; unset, it is `latest`, the newest fork release.
 #
-# `scripts/fork-deploy.sh` builds `agenticos-fork-backend` on the host from the
-# commit it deploys, tags it `sha-<short>`, and tags it `latest` once the stack
-# is healthy. `AGENTICOS_FORK_VERSION` picks the tag; unset, a command by hand
-# gets the last healthy deploy.
-#
-# `pull_policy: never`, because the image exists only on this host: `pull`
-# skips it, and `up` with a tag that was never built fails at once instead of
-# looking for it in a registry.
-#
-# Leave this file out and compose runs upstream's published image, without the
-# fork's changes. `make prod` and `scripts/deploy.sh` do exactly that, so a fork
-# host deploys with `scripts/fork-deploy.sh` and nothing else. The frontend's
-# half is `docker-compose-prod.frontend.fork.yml`.
+# Without this file, compose runs upstream's image, without the fork's changes.
+# The frontend's half is `docker-compose-prod.frontend.fork.yml`.
 
 services:
   migrate:
-    image: agenticos-fork-backend:${AGENTICOS_FORK_VERSION:-latest}
-    pull_policy: never
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
   app:
-    image: agenticos-fork-backend:${AGENTICOS_FORK_VERSION:-latest}
-    pull_policy: never
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
   prefect-runner:
-    image: agenticos-fork-backend:${AGENTICOS_FORK_VERSION:-latest}
-    pull_policy: never
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
