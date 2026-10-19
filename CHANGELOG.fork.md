@@ -25,6 +25,18 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+### Added
+
+- **Deploy the fork from source on its own server** (#8). Upstream publishes
+  images of its own code only. Now `scripts/fork-deploy.sh` builds the backend
+  image and the frontend image from a commit or a tag on the server, and then
+  deploys them. Two overlays, `docker-compose-prod.fork.yml` and
+  `docker-compose-prod.frontend.fork.yml`, run these local images instead of
+  the upstream images. The script builds before it stops anything, so a failed
+  build leaves the running stack as it was. It keeps the last two builds for a
+  rollback. Do not use `make prod` or `scripts/deploy.sh` on a fork server.
+  They start the upstream images, without the fork's changes.
+
 ## [1.6.1-1] - 2026-10-19
 
 Based on upstream [1.6.1](CHANGELOG.md).

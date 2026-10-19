@@ -1,0 +1,15 @@
+# This fork's frontend image instead of upstream's. An overlay, fork-only:
+#
+#   docker compose -p agenticos-frontend --env-file backend/.env \
+#     -f docker-compose-prod.frontend.yml -f docker-compose-prod.frontend.fork.yml up -d
+#
+# The backend's half is `docker-compose-prod.fork.yml`, and the reasoning is
+# there: `scripts/fork-deploy.sh` builds `agenticos-fork-frontend` on the host,
+# `AGENTICOS_FORK_VERSION` picks the tag, and `pull_policy: never` keeps compose
+# from looking for it in a registry. The image reads `PUBLIC_*` when the
+# container starts (#1544), so one build serves any hostname.
+
+services:
+  frontend:
+    image: agenticos-fork-frontend:${AGENTICOS_FORK_VERSION:-latest}
+    pull_policy: never

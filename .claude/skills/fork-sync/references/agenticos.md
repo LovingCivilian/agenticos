@@ -70,6 +70,24 @@ that. If CI shows no runs at all (`gh api repos/<fork>/actions/runs -q
 .total_count`), check that banner and the CI workflow's own enable switch
 before suspecting the code.
 
+## Deploying the fork
+
+Upstream's CI publishes images of upstream's code only, and `images.yml` is
+disabled here, so a fork server builds its own:
+
+- `scripts/fork-deploy.sh <commit-or-tag>`, copied to the server and run there
+  the way `docs/deploy.md` runs `scripts/deploy.sh`. It builds
+  `agenticos-fork-backend` and `agenticos-fork-frontend` from that commit,
+  starts them through `docker-compose-prod.fork.yml` and
+  `docker-compose-prod.frontend.fork.yml`, tags them `latest` once healthy, and
+  keeps the last two builds.
+- The server checkout's `origin` is this fork, and only a commit that has both
+  overlays can be deployed.
+- `make prod`, `make prod-frontend` and `scripts/deploy.sh` run upstream's
+  images, without the fork's changes. Never run them on a fork server.
+- `sandboxd` is upstream's published image; nothing in this repository builds
+  it.
+
 ## Checks to run after a merge
 
 Never `make check`, `make test` or a whole-directory pytest on this machine
@@ -84,6 +102,8 @@ Never `make check`, `make test` or a whole-directory pytest on this machine
 | `docs/mcp.md` and the other guide pages | `python3 scripts/gen_architect_guide.py --check` (re-run it without `--check` to rewrite the copies) |
 | `docs/assets/amigo.svg` | `python3 scripts/gen_amigo_assets.py --check` |
 | frontend | `cd frontend && bunx vitest run <files>`, `make lint-frontend` |
+| `scripts/deploy.sh` | port the change into `scripts/fork-deploy.sh`, which copies its proxy, sandbox, retry and health logic (`tests/test_fork_deploy.py` fails until it matches); `uvx --from shellcheck-py shellcheck scripts/fork-deploy.sh` |
+| `docker-compose-prod*.yml` | a backend service that now runs `agenticos-backend` needs an entry in `docker-compose-prod.fork.yml`, and the frontend's in `docker-compose-prod.frontend.fork.yml` (`tests/test_fork_deploy.py` fails until it has one) |
 
 CI on the pushed commit is what proves the rest. Read it with `gh run list
 --repo LovingCivilian/agenticos --branch <branch>`, and use `gh run view <id>
