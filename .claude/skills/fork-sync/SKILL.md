@@ -101,7 +101,11 @@ Match `mirror.state`:
 - `in-sync` - nothing to do.
 - `behind` - fast-forward it. Ask first, then `gh repo sync <fork> --branch
   main`, falling back to the fast-forward push in references/agenticos.md if
-  it refuses. Then fast-forward local `main`:
+  it refuses. GitHub syncs to upstream's `main` as it is now, which can be
+  newer than the report. So run `git fetch origin` (not `upstream`). If
+  `origin/main` is not `upstream/main`, upstream moved during the sync:
+  re-run Step 1 and tell the user what the new report changes in the plan.
+  Then fast-forward local `main`:
   `git switch main && git merge --ff-only upstream/main`.
 - `ahead` or `diverged` - the mirror is no longer a mirror:
   [scenario 2](references/scenarios.md#2-the-mirror-has-drifted).
