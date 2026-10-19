@@ -18,31 +18,28 @@ develop`) match this.
 
 ## Pushing
 
-`origin` is an HTTPS remote with no stored credential, and the `gh` login lacks
-the `workflow` scope (`gh auth status` shows the scopes). So:
+`origin` is an HTTPS remote. The `gh` login has the `workflow` and
+`write:packages` scopes, and `gh auth setup-git` made it git's credential
+helper for github.com, so a plain push works for branches, tags and workflow
+changes alike:
 
-- **A branch whose commits touch no workflow file:**
-  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin <branch>`
-- **Tags, or commits that add or change `.github/workflows/*`:** over SSH, which
-  is not scope-limited. HTTPS refuses these with "refusing to allow an OAuth App
-  to create or update workflow ... without `workflow` scope". Old upstream tags
-  point at commits carrying earlier workflow files, which is why tags always go
-  over SSH.
-  - Upstream's release tags, by refspec, so no local scratch tag rides along:
-    `git push git@github.com:LovingCivilian/agenticos.git 'refs/tags/v*:refs/tags/v*'`
-  - A fork release tag, by name:
-    `git push git@github.com:LovingCivilian/agenticos.git fork/<version>`
-  - A branch with workflow changes:
-    `git push git@github.com:LovingCivilian/agenticos.git <branch>`
+- **A branch:** `git push origin <branch>`
+- **Upstream's release tags**, by refspec, so no local scratch tag rides along:
+  `git push origin 'refs/tags/v*:refs/tags/v*'`
+- **A fork release tag**, by name: `git push origin fork/<version>`
 - **The mirror:** `gh repo sync LovingCivilian/agenticos --branch main` asks
-  GitHub to fast-forward it, and refuses if `main` has diverged. If it refuses
-  over workflow files, push the fast-forward over SSH instead:
-  `git push git@github.com:LovingCivilian/agenticos.git upstream/main:refs/heads/main`.
+  GitHub to fast-forward it, and refuses if `main` has diverged. If it refuses,
+  push the fast-forward instead: `git push origin upstream/main:refs/heads/main`.
   Git rejects that push unless it is a fast-forward, which is the guarantee
   wanted.
 
-Running `gh auth refresh -h github.com -s workflow` once (the user has to run it,
-since it opens a browser) would let HTTPS do all of the above.
+If a push of a tag or a workflow file fails with "refusing to allow an OAuth App
+to create or update workflow ... without `workflow` scope", the login lost that
+scope (`gh auth status` lists them). Restore it with `gh auth refresh -h
+github.com -s workflow,write:packages`, which the user runs because it opens a
+browser, or push over SSH meanwhile: `git push
+git@github.com:LovingCivilian/agenticos.git <ref>`. Old upstream tags point at
+commits carrying earlier workflow files, so tags need that scope too.
 
 ## Merging PRs
 
@@ -208,7 +205,7 @@ do. Categories: `### Added`, `### Changed`, `### Fixed`, `### Removed`,
    as its first line. Put a fresh, empty `## [Unreleased]` above it.
 3. Open a PR into `develop`, and ask the user to merge it.
 4. Tag the merge commit, after asking:
-   `git tag fork/<version> <merge-sha>`, then push it over SSH. The push starts
+   `git tag fork/<version> <merge-sha>`, then `git push origin fork/<version>`. The push starts
    `fork-images.yml`, which publishes that version's images; watch it with
    `gh run list --repo LovingCivilian/agenticos --workflow fork-images.yml`.
 5. Optionally, after asking:

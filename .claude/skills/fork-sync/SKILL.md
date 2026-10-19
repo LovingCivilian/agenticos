@@ -100,8 +100,8 @@ Match `mirror.state`:
 
 - `in-sync` - nothing to do.
 - `behind` - fast-forward it. Ask first, then `gh repo sync <fork> --branch
-  main`, falling back to the SSH push in references/agenticos.md when upstream
-  changed workflow files. Then fast-forward local `main`:
+  main`, falling back to the fast-forward push in references/agenticos.md if
+  it refuses. Then fast-forward local `main`:
   `git switch main && git merge --ff-only upstream/main`.
 - `ahead` or `diverged` - the mirror is no longer a mirror:
   [scenario 2](references/scenarios.md#2-the-mirror-has-drifted).
