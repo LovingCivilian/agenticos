@@ -1,0 +1,18 @@
+# This fork's backend image instead of upstream's. Fork-only overlay, which
+# `GNUmakefile` adds to `make prod`, `make prod-down` and `make prod-logs`.
+#
+# `.github/workflows/fork-images.yml` builds the image from a `fork/*` tag and
+# publishes it as `ghcr.io/lovingcivilian/agenticos-backend:<version>`.
+# `AGENTICOS_VERSION` in `backend/.env` picks the version, as it does for
+# upstream's image; unset, it is `latest`, the newest fork release.
+#
+# Without this file, compose runs upstream's image, without the fork's changes.
+# The frontend's half is `docker-compose-prod.frontend.fork.yml`.
+
+services:
+  migrate:
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
+  app:
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
+  prefect-runner:
+    image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}

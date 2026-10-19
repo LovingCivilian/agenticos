@@ -364,8 +364,8 @@ current state of each).
 - **A changed workflow we disabled stays disabled.** Say what changed, in case it
   now matters to the fork.
 - **A changed workflow we keep** (CI, CodeQL, AI review): say what changed.
-- **Pushing a commit that changes workflow files** needs the `workflow` scope, or
-  the SSH push (references/agenticos.md).
+- **Pushing a commit that changes workflow files** needs the `workflow` scope,
+  which the `gh` login has (references/agenticos.md, Pushing).
 
 ## 11. Fork plumbing
 

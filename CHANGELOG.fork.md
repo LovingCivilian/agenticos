@@ -25,6 +25,18 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+### Added
+
+- **The fork's own images, deployed with `make prod`** (#8). Upstream
+  publishes images of its own code only. Now a `fork/<version>` tag builds the
+  fork's backend image and frontend image in CI and publishes them as
+  `ghcr.io/lovingcivilian/agenticos-{backend,frontend}:<version>`. On the
+  server, set `AGENTICOS_VERSION=<version>` in `backend/.env`, then run
+  `make prod` and `make prod-frontend`, as upstream's manual deploy does. A
+  `GNUmakefile` adds two overlays to the prod targets, and the overlays replace
+  the upstream image names with the fork's. Do not use `scripts/deploy.sh` on a
+  fork server, because it pulls the upstream images.
+
 ## [1.6.1-1] - 2026-10-19
 
 Based on upstream [1.6.1](CHANGELOG.md).

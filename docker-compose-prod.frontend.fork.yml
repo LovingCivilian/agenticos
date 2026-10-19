@@ -1,0 +1,7 @@
+# This fork's frontend image instead of upstream's. Fork-only overlay, which
+# `GNUmakefile` adds to `make prod-frontend` and `make prod-down`. The backend's
+# half, and the reasoning, is `docker-compose-prod.fork.yml`.
+
+services:
+  frontend:
+    image: ghcr.io/lovingcivilian/agenticos-frontend:${AGENTICOS_VERSION:-latest}
