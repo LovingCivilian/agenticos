@@ -25,6 +25,10 @@ ungoogled-chromium.
 
 ## [Unreleased]
 
+## [1.6.1-3] - 2026-10-19
+
+Based on upstream [1.6.1](CHANGELOG.md).
+
 ### Added
 
 - **A server's own compose settings, outside git** (#10). A server can now
