@@ -83,6 +83,12 @@ way upstream's manual deploy runs upstream's:
   `docker-compose-prod.frontend.fork.yml` replace upstream's image names with
   these. `GNUmakefile` includes upstream's `Makefile` and adds the overlays to
   `make prod`, `make prod-frontend`, `make prod-down` and `make prod-logs`.
+- **A server's own settings:** `docker-compose-prod.local.yml` (backend) and
+  `docker-compose-prod.frontend.local.yml` (frontend), beside `backend/.env`
+  and never committed. `GNUmakefile` adds each one last when it exists, so it
+  overrides the rest - an external network an MCP server is on, a resource
+  limit. Keep the compose project name: a different `name:` starts the stack
+  on new, empty volumes.
 - **Deploy, on the server:** check out the release tag, set
   `AGENTICOS_VERSION=<version>` in `backend/.env`, then `make prod` and
   `make prod-frontend`. The checkout's `origin` is this fork.

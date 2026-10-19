@@ -10,6 +10,9 @@ tests fail on a drift a sync with upstream could bring in without a conflict:
   - `GNUmakefile` appends to file lists upstream's `Makefile` defines. A rename
     there leaves `make prod` on upstream's images, so the targets are dry-run
     (`make -n`) and the commands they would run are read back.
+
+A server's own `*.local.yml` overlay is tried in a copy of the two makefiles,
+so the test never writes a file into the checkout.
 """
 
 from __future__ import annotations
@@ -94,3 +97,40 @@ def test_the_prod_make_targets_take_the_overlays(
     commands = [line for line in result.stdout.splitlines() if line.startswith("docker compose")]
     assert len(commands) == count
     assert all(overlay in command for command in commands), commands
+
+
+def _dry_run_commands(directory: Path, *targets: str) -> list[str]:
+    result = subprocess.run(
+        [MAKE, "--no-print-directory", "-C", str(directory), "-n", *targets],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return [line for line in result.stdout.splitlines() if line.startswith("docker compose")]
+
+
+@pytest.mark.parametrize(
+    ("target", "local"),
+    [
+        ("prod", "docker-compose-prod.local.yml"),
+        ("prod-frontend", "docker-compose-prod.frontend.local.yml"),
+    ],
+)
+class TestAServersOwnOverlayComesLast:
+    def test_it_is_the_last_file_when_it_exists(
+        self, tmp_path: Path, target: str, local: str
+    ) -> None:
+        shutil.copy(REPO_ROOT / "GNUmakefile", tmp_path)
+        shutil.copy(REPO_ROOT / "Makefile", tmp_path)
+        (tmp_path / local).write_text("services: {}\n")
+        commands = _dry_run_commands(tmp_path, target)
+        assert commands
+        assert all(command.split(" -f ")[-1].split()[0] == local for command in commands), commands
+
+    def test_a_missing_one_is_skipped(self, tmp_path: Path, target: str, local: str) -> None:
+        shutil.copy(REPO_ROOT / "GNUmakefile", tmp_path)
+        shutil.copy(REPO_ROOT / "Makefile", tmp_path)
+        commands = _dry_run_commands(tmp_path, target)
+        assert commands
+        assert not any(".local.yml" in command for command in commands), commands
