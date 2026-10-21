@@ -1,6 +1,6 @@
 # This fork's backend and frontend images. Fork-only.
 #
-#   ghcr.io/lovingcivilian/agenticos-backend    the API, the Prefect runner, the migrations
+#   ghcr.io/lovingcivilian/agenticos-backend    the API, the background worker, the migrations
 #   ghcr.io/lovingcivilian/agenticos-frontend   the console
 #
 # Upstream's `images.yml` publishes upstream's code under `ghcr.io/vstorm-co`

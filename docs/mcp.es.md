@@ -1,5 +1,5 @@
 ---
-source_sha: "70b188954999"
+source_sha: "205271071a8e"
 ---
 
 # MCP — las herramientas que aquí nadie tiene que escribir { #mcp-the-tools-nobody-here-has-to-write }
@@ -561,9 +561,13 @@ siendo dos herramientas. Al servidor se le sigue llamando por su nombre real.
     conexión tumbaría todos los agents que la nombran, incluidos los que nunca la
     necesitaron.
 
-    El modelo responde entonces **sin** esas herramientas — lo correcto para un
-    turno de chat, lo incorrecto si dabas por hecho que una herramienta siempre
-    estaba ahí.
+    El modelo responde entonces **sin** esas herramientas, y lo sabe: las
+    instrucciones del turno nombran el servidor, dicen que no respondió o rechazó
+    la conexión, y piden al modelo que diga que no se pudo contactar en vez de
+    informar de un resultado vacío. Vale también para un servidor que respondió
+    hace un momento y falla cuando el turno se conecta. Lo correcto para un turno
+    de chat, lo incorrecto si dabas por hecho que una herramienta siempre estaba
+    ahí.
 
 Es un intercambio deliberado. El endpoint `/test` y `last_status` son cómo te
 enteras, y el [rastro de auditoría](governance.md#audit) registra lo que se

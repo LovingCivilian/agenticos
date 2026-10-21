@@ -14,5 +14,5 @@ services:
     image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
   app:
     image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
-  prefect-runner:
+  worker:
     image: ghcr.io/lovingcivilian/agenticos-backend:${AGENTICOS_VERSION:-latest}
