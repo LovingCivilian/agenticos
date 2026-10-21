@@ -27,12 +27,13 @@ ungoogled-chromium.
 
 ### Changed
 
-- **The fork's backend image runs the new `worker` service**. Upstream 1.9.0
-  replaces the `prefect-server` and `prefect-runner` services with one `worker`
-  service. Now `docker-compose-prod.fork.yml` puts the fork's image on `worker`,
-  not on `prefect-runner`. Before you run `make prod` for this release on a fork
-  server, remove the containers of the two old services with `docker rm -f`
-  (`docker ps -a` names them, for example `agenticos-prefect-runner-1`).
+- **The fork's backend image runs the new `worker` service** (#19). Upstream
+  1.9.0 replaces the `prefect-server` and `prefect-runner` services with one
+  `worker` service. Now `docker-compose-prod.fork.yml` puts the fork's image on
+  `worker`, not on `prefect-runner`. Before you run `make prod` for this release
+  on a fork server, remove the containers of the two old services with
+  `docker rm -f` (`docker ps -a` names them, for example
+  `agenticos-prefect-runner-1`).
   `make prod` does not remove them, and while they run, Prefect continues to
   start the old jobs. Then remove the `PREFECT_*` variables from `backend/.env`
   and do the other upgrade steps in the upstream 1.9.0 entry.
