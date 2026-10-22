@@ -15,8 +15,6 @@ A server's own `*.local.yml` overlay is tried in a copy of the two makefiles,
 so the test never writes a file into the checkout.
 """
 
-from __future__ import annotations
-
 import shutil
 import subprocess
 from pathlib import Path

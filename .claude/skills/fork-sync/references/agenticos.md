@@ -54,7 +54,9 @@ upstream change since the old merge base and conflicts on all of them.
 Disabled on the fork, because they act on upstream's infrastructure or would
 publish from the fork: `images.yml` (pushes to `ghcr.io/vstorm-co/...`),
 `deploy.yml` (needs `DEPLOY_SSH_KEY`), `deploy-queue.yml`, `docs.yml` (GitHub
-Pages), `dependency-freshness.yml`. Kept: `ci.yml`, `codeql.yml`, and
+Pages), `dependency-freshness.yml`. Also disabled: `load.yml`, upstream's
+nightly 30-minute load test on the default branch, which the fork does not
+read. Kept: `ci.yml`, `codeql.yml`, and
 `ai-review.yml`, which runs on manual dispatch only until upstream restores its
 `pull_request` trigger (its label gate returns with it). Fork-only:
 `fork-images.yml`, which publishes the fork's images (see below). Check the live state with

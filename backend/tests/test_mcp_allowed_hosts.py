@@ -16,8 +16,6 @@ records each name it was asked, so a test can tell "accepted" apart from
 "resolved, and happened to pass", and nothing here leaves the machine.
 """
 
-from __future__ import annotations
-
 import logging
 
 import httpx2
