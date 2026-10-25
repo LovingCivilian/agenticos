@@ -210,7 +210,11 @@ export function ThinkingBlock({
         ref={scrollerRef}
         className="text-muted-foreground border-foreground/10 mt-2 max-h-72 overflow-y-auto border-l pl-3.5 text-[13px] leading-relaxed"
       >
-        <div ref={contentRef} className={cn(isStreaming && "stream-in")}>
+        {/* Clipped while it streams: a new block rises from 3px below its place,
+            and browsers count that offset as scroll height, so the follow pinned
+            the box 3px too deep and it slid back as the block rose. The transcript
+            never bobbed because its padding absorbs the offset; this box has none. */}
+        <div ref={contentRef} className={cn(isStreaming && "stream-in overflow-y-clip")}>
           <MarkdownContent content={visible} streaming={flowing} />
         </div>
       </div>

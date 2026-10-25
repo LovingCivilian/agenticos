@@ -50,6 +50,7 @@ describe("ThinkingBlock streaming effects", () => {
     await waitFor(() => expect(container.querySelector("p")).not.toBeNull());
     expect(container.querySelector(".stream-word")).toBeNull();
     expect(container.querySelector(".stream-in")).toBeNull();
+    expect(container.querySelector(".overflow-y-clip")).toBeNull();
     expect(scroller).toHaveClass("max-h-72", "overflow-y-auto");
   });
 
@@ -62,6 +63,14 @@ describe("ThinkingBlock streaming effects", () => {
     expect(container.querySelector(".stream-in")).toBeNull();
     expect(container.querySelector(".stream-word")).not.toBeNull();
     await waitFor(() => expect(container.querySelector(".stream-word")).toBeNull());
+  });
+
+  it("clips a rising paragraph while streaming, so the box following it does not bob", () => {
+    // A new block rises from 3px below its place, and browsers count that offset
+    // as scroll height: the box followed to a foot 3px too deep, then slid back.
+    const { scroller } = mount(true);
+
+    expect(scroller.firstElementChild).toHaveClass("stream-in", "overflow-y-clip");
   });
 
   it("follows the content to its bottom while streaming", () => {
