@@ -1,5 +1,5 @@
 ---
-source_sha: "4fe91aa6f038"
+source_sha: "bb212f4c1701"
 ---
 
 # Koncepcje { #concepts }
@@ -71,13 +71,19 @@ Spec trzyma się dwóch reguł i to właśnie one czynią go użytecznym.
 
 **Zamrożony spec.**
 
-Publikacja kopiuje draft do wersji i wskazuje na nią agenta. Runy zapisują,
-która wersja została wykonana.
+Publikacja kopiuje draft do wersji. Środowiska decydują, która wersja obsługuje
+daną powierzchnię, a runy zapisują, która została wykonana.
 
 Dlatego *co ten agent zrobił w zeszły wtorek* pozostaje pytaniem, na które da się
 odpowiedzieć po kilkunastu edycjach. Dlatego też rollback publikuje **nową**
 wersję skopiowaną ze starej, zamiast kasować historię — oś czasu pokazuje, że
 rollback się wydarzył, zamiast udawać, że zła wersja nigdy nie istniała.
+
+Zapisy szkicu, publikacje, rollbacki i zmiany środowisk wykonują się kolejno dla
+jednego agenta. Zapis czekający na publikację pozostaje później szkicem i nie
+zostaje przez nią nadpisany. Równoczesne publikacje otrzymują odrębne numery wersji,
+a promocja domyślnego środowiska utrzymuje zgodność wersji obsługującej agenta.
+Nowe runy mogą startować podczas walidacji publikacji.
 
 ### Środowiska { #environments }
 
@@ -194,9 +200,9 @@ skrzynce*, którego domyślne ustawienie nie potrafi — na tych warunkach:
   notatka zapisana na jej podstawie byłaby czytana w każdym kolejnym czacie jako
   własna notatka twórcy.
 - **Poprzednie rozmowy pozostają zamknięte** w obu przypadkach.
-- **Edycja kogoś innego to wyłącza.** Zmiana wiadomości, środowiska albo filtra
-  triggera, którego nie utworzyłeś, wyłącza ustawienie, więc nikt nie przepisze
-  tego, co działa jako ty. Administrator działający jako ty przez impersonację
+- **Edycja kogoś innego to wyłącza.** Zmiana wiadomości, środowiska, filtra albo
+  kanału Teams triggera, którego nie utworzyłeś, wyłącza ustawienie, więc nikt
+  nie przepisze tego, co działa jako ty, ani nie wyśle odpowiedzi gdzie indziej. Administrator działający jako ty przez impersonację
   ani skrypt z twoim kluczem API nie mogą go włączyć.
 - **Tak samo nowa wersja opublikowana nie przez ciebie osobiście.** Publikacja, promocja
   albo cofnięcie przez kogokolwiek innego to wyłącza - także zrobione twoim
@@ -227,6 +233,8 @@ używany* potrafi odróżnić run bez nadzoru od runa człowieka. Każde odpalen
 osobny run w Activity, a jego odpowiedzi zbierają się w jednej rozmowie będącej
 dziennikiem runów, którą trigger otwiera raz — zawczasu, w momencie utworzenia
 triggera, więc jest klikalną pozycją, zanim jeszcze kiedykolwiek się odpali.
+Trigger może też publikować każdą odpowiedź na kanale albo w czacie grupowym Teams,
+w którym jest bot jego organizacji ([Microsoft Teams](channels.md#microsoft-teams)).
 
 ### Dwa sposoby odpalania { #two-ways-to-fire }
 

@@ -24,7 +24,7 @@ names no author is in the evidence column below.
 | Licence | Backend | Frontend |
 |---|---:|---:|
 | MIT | 105 | 241 |
-| Apache-2.0 | 64 | 24 |
+| Apache-2.0 | 66 | 24 |
 | BSD-3-Clause | 24 | 4 |
 | ISC | 3 | 16 |
 | BSD-2-Clause | 7 | 0 |
@@ -49,7 +49,7 @@ names no author is in the evidence column below.
 
 ## Backend image (Python)
 
-223 distributions.
+225 distributions.
 
 | Component | Version | Licence | Source | Evidence |
 |---|---|---|---|---|
@@ -109,9 +109,9 @@ names no author is in the evidence column below.
 | executing | 2.2.1 | MIT | https://github.com/alexmojaki/executing | License field |
 | fastapi | 0.143.2 | MIT | https://github.com/fastapi/fastapi | License-Expression |
 | fastavro | 1.13.1 | MIT | https://github.com/fastavro/fastavro | License field |
-| fastmcp | 4.1.0 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp | License-Expression |
-| fastmcp-slim | 4.1.0 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp | License-Expression; no licence file, attributed to Jeremiah Lowin, Nate Nowack |
-| filelock | 3.32.6 | MIT | https://github.com/tox-dev/py-filelock | License-Expression |
+| fastmcp | 4.1.2 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp | License-Expression |
+| fastmcp-slim | 4.1.2 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp | License-Expression; no licence file, attributed to Jeremiah Lowin, Nate Nowack |
+| filelock | 4.2.1 | MIT | https://github.com/tox-dev/py-filelock | License-Expression |
 | frozenlist | 1.8.0 | Apache-2.0 | https://github.com/aio-libs/frozenlist | License field |
 | fsspec | 2026.7.0 | BSD-3-Clause | https://github.com/fsspec/filesystem_spec | License-Expression |
 | genai-prices | 0.1.13 | MIT | https://github.com/pydantic/genai-prices | License-Expression |
@@ -175,20 +175,22 @@ names no author is in the evidence column below.
 | openai | 3.29.0 | Apache-2.0 | https://github.com/openai/openai-python | License-Expression |
 | openapi-pydantic | 0.6.0 | MIT | https://github.com/mike-oakley/openapi-pydantic | License field |
 | openpyxl | 3.1.5 | MIT | https://foss.heptapod.net/openpyxl/openpyxl | License field |
-| opentelemetry-api | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-exporter-otlp-proto-common | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-exporter-otlp-proto-http | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-instrumentation | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-aiohttp-client | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-asgi | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-asyncpg | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-fastapi | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-httpx | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-instrumentation-redis | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
-| opentelemetry-proto | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-sdk | 1.44.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-semantic-conventions | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
-| opentelemetry-util-http | 0.65b0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression; no licence file, attributed to OpenTelemetry Authors |
+| opentelemetry-api | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-exporter-http-transport | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-exporter-otlp-common | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-exporter-otlp-proto-common | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-exporter-otlp-proto-http | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-instrumentation | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-aiohttp-client | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-asgi | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-asyncpg | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-fastapi | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-httpx | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-instrumentation-redis | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression |
+| opentelemetry-proto | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-sdk | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-semantic-conventions | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python | License-Expression |
+| opentelemetry-util-http | 0.66b1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python-contrib | License-Expression; no licence file, attributed to OpenTelemetry Authors |
 | packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging | License-Expression |
 | pathable | 0.6.0 | Apache-2.0 | https://github.com/p1c2u/pathable | License field |
 | phonenumberslite | 9.0.41 | Apache-2.0 | https://github.com/daviddrysdale/python-phonenumbers | License-Expression |
@@ -207,11 +209,11 @@ names no author is in the evidence column below.
 | pycparser | 3.0 | BSD-3-Clause | https://github.com/eliben/pycparser | License-Expression |
 | pydantic | 2.14.1 | MIT | https://github.com/pydantic/pydantic | License-Expression |
 | pydantic-ai-backend | 0.2.37 | MIT | https://github.com/vstorm-co/pydantic-ai-backend | License-Expression |
-| pydantic-ai-harness | 0.57.0 | MIT | https://github.com/pydantic/pydantic-ai | License-Expression |
+| pydantic-ai-harness | 0.59.0 | MIT | https://github.com/pydantic/pydantic-ai | License-Expression |
 | pydantic-ai-skills | 2.1.0 | MIT | https://github.com/dougtrajano/pydantic-ai-skills | License-Expression |
-| pydantic-ai-slim | 2.57.0 | MIT | https://github.com/pydantic/pydantic-ai/tree/main/pydantic_ai_slim | License-Expression |
+| pydantic-ai-slim | 2.59.0 | MIT | https://github.com/pydantic/pydantic-ai/tree/main/pydantic_ai_slim | License-Expression |
 | pydantic-core | 2.50.1 | MIT | https://github.com/pydantic/pydantic/tree/main/pydantic-core | License-Expression |
-| pydantic-graph | 2.57.0 | MIT | https://github.com/pydantic/pydantic-ai | License-Expression |
+| pydantic-graph | 2.59.0 | MIT | https://github.com/pydantic/pydantic-ai | License-Expression |
 | pydantic-monty | 1.1.0 | MIT | https://github.com/pydantic/monty | License-Expression; no licence file, attributed to Pydantic Services Inc. |
 | pydantic-monty-client | 1.1.0 | MIT | https://github.com/pydantic/monty | License field; no licence file, attributed to Pydantic Services Inc. |
 | pydantic-monty-runtime | 1.1.0 | MIT | https://github.com/pydantic/monty | License field; no licence file, attributed to Pydantic Services Inc. |
@@ -604,7 +606,7 @@ and data files.
 | Mermaid, vendored into backend/app/core/catalog/artifact_lib/ | 12.1.0 (dist/mermaid.min.js from the npm tarball) | source, backend image, served to published artifacts and visuals | MIT; the bundle includes its dependencies, among them DOMPurify (MPL-2.0 OR Apache-2.0, used under Apache-2.0), elkjs (EPL-2.0), d3 and d3-sankey (ISC, BSD-3-Clause), chevrotain (Apache-2.0) and MIT-licensed others (cytoscape, dagre-d3-es, dayjs, katex, khroma, marked, roughjs, stylis, uuid) | https://github.com/mermaid-js/mermaid | accepted | MIT and ISC: keep the notices. Apache-2.0: keep the licence and its notices. EPL-2.0 (elkjs, distributed unmodified in object form): ship the licence and say where its source is available. | The bundle is copied byte for byte and keeps the headers it carries (DOMPurify's among them); backend/app/core/catalog/artifact_lib/README.md carries Mermaid's MIT text, names every bundled dependency with its licence, links the EPL-2.0 text and the elkjs 0.9.3 source, and NOTICE names it. Copied for the same reason as Chart.js (#2171). |
 | idiomorph, vendored into backend/app/core/catalog/artifact_lib/ | 0.8.0 (dist/idiomorph.min.js from the npm tarball) | source, backend image, served to the visual frame | 0BSD | https://github.com/bigskysoftware/idiomorph | accepted | None: the Zero-Clause BSD licence asks for no notice. | Copied byte for byte; backend/app/core/catalog/artifact_lib/README.md names it with its licence text anyway. It morphs a visual's markup in place while the drawing streams (#2171). |
 | Leaflet, vendored into backend/app/core/catalog/artifact_lib/ | 1.9.4 (dist/leaflet.js and dist/leaflet.css from the npm tarball) | source, backend image, served to published artifacts and visuals | BSD-2-Clause | https://github.com/Leaflet/Leaflet | accepted | Keep the copyright notice, the conditions and the disclaimer with the copies, in source and in the documentation of a binary distribution. | Copied byte for byte; backend/app/core/catalog/artifact_lib/README.md carries the BSD-2-Clause text with both copyright lines, and NOTICE names it. The map kit draws an itinerary on the deployment's tile server with it (#2302). Copied for the same reason as Chart.js. |
-| Open Intelligent UI, adapted into agenticos-map-1.js and the visual-design skill | 8391a94c1c3939c679e40ddd7bfc08a9ef690e70 | source, backend image, served to published artifacts and visuals | MIT | https://github.com/CopilotKit/OpenIntelligentUI | accepted | Keep the copyright notice and the permission notice with the copies or substantial portions of the software. | The pin-drop timing of createTripAnimator is adapted in backend/app/core/catalog/artifact_lib/agenticos-map-1.js, whose header carries the MIT notice with the copyright line; the visual-design skill's guidance on choosing the form of an answer, follow-ups and itineraries borrows from its playbook and skills. backend/app/core/catalog/artifact_lib/README.md and NOTICE name it (#2302). |
+| Open Intelligent UI, adapted into agenticos-map-1.js and the visual-design skill | 8391a94c1c3939c679e40ddd7bfc08a9ef690e70 | source, backend image, served to published artifacts and visuals | MIT | https://github.com/CopilotKit/OpenIntelligentUI | accepted | Keep the copyright notice and the permission notice with the copies or substantial portions of the software. | The pin-drop timing of createTripAnimator is adapted in backend/app/core/catalog/artifact_lib/agenticos-map-1.js and agenticos-map-2.js, whose headers carry the MIT notice with the copyright line; the visual-design skill's guidance on choosing the form of an answer, follow-ups and itineraries borrows from its playbook and skills. backend/app/core/catalog/artifact_lib/README.md and NOTICE name it (#2302). |
 | pgvector/pgvector | pg16 | service image, deployment | PostgreSQL: PostgreSQL License. pgvector: PostgreSQL License. | https://github.com/pgvector/pgvector | accepted | Permissive; keep the copyright notice with copies. Not redistributed by this project. | Pulled by the operator from Docker Hub; named here with its source. |
 | valkey/valkey | 8-alpine | service image, deployment | BSD-3-Clause | https://github.com/valkey-io/valkey | accepted | Keep the copyright notice with copies. Not redistributed by this project. | Pulled by the operator from Docker Hub; named here with its source. Replaced redis:7-alpine in #1603: Redis is RSALv2 or SSPL-1.0 from 7.4.0, neither OSI-approved, and the default compose path should not start a non-open component without saying so. Valkey is the Linux Foundation fork of Redis 7.2 under BSD-3-Clause. |
 | traefik | v3.7 | service image, deployment (optional reverse proxy) | MIT | https://github.com/traefik/traefik | accepted | Keep the copyright notice. Not redistributed by this project. | Pulled by the operator; named here with its source. |

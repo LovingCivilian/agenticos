@@ -1,5 +1,5 @@
 ---
-source_sha: "4fe91aa6f038"
+source_sha: "bb212f4c1701"
 ---
 
 # Conceptos { #concepts }
@@ -73,13 +73,19 @@ El spec cumple dos reglas, y son las que lo hacen útil.
 
 **Un spec congelado.**
 
-Publicar copia el borrador en una versión y apunta el agent a ella. Los runs
-registran qué versión se ejecutó.
+Publicar copia el borrador en una versión. Los entornos deciden qué versión
+atiende cada superficie, y los runs registran cuál se ejecutó.
 
 Por eso *qué hizo este agent el martes pasado* sigue teniendo respuesta después
 de una docena de ediciones. Y también por eso un rollback publica una **nueva**
 versión copiada de la antigua en lugar de borrar historial — la línea de tiempo
 muestra que hubo un rollback, en vez de fingir que la versión mala nunca existió.
+
+Los cambios de borrador, publicaciones, rollbacks y cambios de entorno se
+ejecutan en orden para cada agente. Un guardado que espera a una publicación
+permanece después como borrador. Las publicaciones concurrentes reciben números
+de versión distintos. Promover el entorno predeterminado mantiene alineada la
+versión que sirve el agente. Los nuevos runs pueden comenzar durante la validación.
 
 ### Entornos { #environments }
 
@@ -197,9 +203,9 @@ condiciones:
   evento lleva un correo o el cuerpo de un webhook que nadie revisó, y una nota
   escrita a partir de él la leería cada chat posterior como propia del creador.
 - **Las conversaciones anteriores siguen cerradas** en ambos casos.
-- **La edición de otra persona lo desactiva.** Cambiar el mensaje, el entorno o el
-  filtro de un trigger que no creaste lo desactiva, así que nadie reescribe lo que
-  se ejecuta como tú. Un administrador que actúa como tú mediante suplantación, o
+- **La edición de otra persona lo desactiva.** Cambiar el mensaje, el entorno, el
+  filtro o el canal de Teams de un trigger que no creaste lo desactiva, así que
+  nadie reescribe lo que se ejecuta como tú ni envía su respuesta a otro sitio. Un administrador que actúa como tú mediante suplantación, o
   un script con tu clave de API, no puede activarlo.
 - **También una versión nueva que no publicaste tú.** Una publicación, una
   promoción o una reversión de cualquier otra persona lo desactiva, y también una
@@ -230,7 +236,9 @@ distinguir un run desatendido del de una persona. Cada disparo es su propio run
 en Activity, y sus respuestas se acumulan en una única conversación de registro
 que el trigger abre una vez — de forma anticipada, en el momento en que se crea
 el trigger, así que es un elemento en el que puedes pulsar antes de que se haya
-disparado nunca.
+disparado nunca. Un trigger también puede publicar cada respuesta en un canal o
+chat de grupo de Teams en el que esté el bot de su organización
+([Microsoft Teams](channels.md#microsoft-teams)).
 
 ### Dos formas de disparar { #two-ways-to-fire }
 

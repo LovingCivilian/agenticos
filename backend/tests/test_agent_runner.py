@@ -7,6 +7,7 @@ it was parked on, with the spend it had already booked.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -52,12 +53,14 @@ from app.agents.capabilities.budget import (
 )
 from app.agents.capabilities.channel_tools import CHANNEL_DIRECTORY_RESOURCE
 from app.agents.capabilities.compaction import ContextGauge
+from app.agents.capabilities.follow_ups import FOLLOW_UPS_MODEL_RESOURCE
 from app.agents.capabilities.guardrails import GuardrailBlocked
 from app.agents.capabilities.planning import PLANNING_STORE_RESOURCE
 from app.agents.capabilities.sandbox import WORKSPACE_RESOURCE, WORKSPACE_SHARED_RESOURCE
 from app.agents.capabilities.sandbox._capability import build_workspace
 from app.agents.capabilities.sandbox._recording import RecordingWorkspace
 from app.agents.connect_on_use import ConnectionRequest, ConnectOnUse
+from app.agents.deps import AgentDeps, WrittenNextSteps
 from app.agents.loop_guard import ToolLoopStopped
 from app.agents.spec import (
     AgentSpec,
@@ -93,10 +96,12 @@ from app.services.agent_runner import (
     _answer_only,
     _classify_output,
     _connect_on_use,
+    _RunRendering,
     _spend_already_booked,
     _start_turn_on_first_use,
     _with_account_notes,
     _with_personal_service_gaps,
+    _written_next_steps,
     month_start,
     run_failure_summary,
 )
@@ -113,6 +118,20 @@ from app.services.sandbox_workspace import OpenWorkspace
 from app.services.skill_workspace import SKILLS_ROOT
 from app.services.transcript import RecordedToolCall
 from tests.workspaces import document_workspace
+
+
+@pytest.fixture(autouse=True)
+def _nobody_the_account_describes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No account behind these runs' facts; `test_prompt_variables` covers the person (#2301).
+
+    The mocked session would answer the lookup with a `MagicMock`, whose every
+    profile field is truthy and none of which is a value.
+    """
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "app.services.agent_runner.user_repo.get_by_id", AsyncMock(return_value=None)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1284,6 +1303,64 @@ class TestAPlanThatOutlivesTheTurn:
 
         store = build.call_args.kwargs["resources"][PLANNING_STORE_RESOURCE]
         assert [item.content for item in await store.get_items()] == ["Ship the fix"]
+
+    @pytest.mark.anyio
+    async def test_a_resume_keeps_the_files_the_run_generated_before_it_parked(self):
+        """A starting image for `generate_video` must be one the run itself made, and
+        a resume builds fresh deps: without the parked list, a clip approved after a
+        park could not start from the picture drawn before it."""
+        ctx = _ctx()
+        service = AgentRunnerService(_db())
+        run = _parked_run(
+            conversation_id=uuid.uuid4(),
+            paused_state={
+                "messages": [],
+                "tool_call_ids": {},
+                "generated_files": ["a1b2_image.png"],
+            },
+        )
+        agent = MagicMock(id=run.agent_id, current_version_id=run.agent_version_id)
+        spec = AgentSpec(name="Support")
+        stale = MagicMock(
+            overhead_tokens=None,
+            reminder_state=None,
+            plan_items=[{"id": "aa11", "content": "Write the fix", "status": "pending"}],
+        )
+
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                new=AsyncMock(return_value=run),
+            ),
+            patch(
+                "app.services.agent_runner.agent_run_repo.list_approvals_for_run",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("app.services.agent_runner.agent_run_repo.mark_running", new=AsyncMock()),
+            patch("app.services.agent_runner.agent_run_repo.finish_run", new=AsyncMock()),
+            patch.object(service, "_parked_spec", new=AsyncMock(return_value=(agent, spec))),
+            patch.object(
+                service.models, "resolve", new=AsyncMock(return_value=MagicMock(label="gpt-4.1"))
+            ),
+            patch.object(service.skills, "resolve_for_agent", new=AsyncMock(return_value=[])),
+            patch(
+                "app.services.agent_runner.conversation_repo.get_conversation_by_id",
+                new=AsyncMock(return_value=stale),
+            ),
+            patch.object(service.transcript, "record", new=AsyncMock()),
+            patch("app.services.agent_runner.ConversationService") as conversations,
+            patch("app.services.agent_runner.build_agent") as build,
+        ):
+            conversations.return_value.keep_summary = AsyncMock()
+            conversations.return_value.keep_overhead = AsyncMock()
+            conversations.return_value.keep_reminder_state = AsyncMock()
+            conversations.return_value.keep_plan = AsyncMock()
+            build.return_value.agent.run = AsyncMock(return_value=MagicMock(output="done"))
+            build.return_value.ledger = SpendLedger()
+            build.return_value.deps = AgentDeps()
+            await service.resume(ctx, run.id)
+
+        assert build.return_value.deps.generated_files == {"a1b2_image.png"}
 
 
 class TestRecordedConversationState:
@@ -2725,6 +2802,8 @@ class TestParking:
             # And an empty checklist, which is a run that bound no planning
             # capability: the store the runner always opens held nothing to snapshot.
             "plan": [],
+            # And no generated files, which is a run whose tools stored none.
+            "generated_files": [],
             # What the request asked for, so the continuation is the same run rather
             # than a default-mode one wearing its id (#1326, #1343, #788).
             "admitted_as": {
@@ -2760,6 +2839,25 @@ class TestParking:
 
         stored = finish.call_args.kwargs["paused_state"]["plan"]
         assert [item["content"] for item in stored] == ["Write the fix"]
+
+    @pytest.mark.anyio
+    async def test_a_parked_run_snapshots_the_files_it_generated(self):
+        service = AgentRunnerService(_db())
+        prepared = _prepared()
+        prepared.built.deps = AgentDeps(generated_files={"b2_video.mp4", "a1_image.png"})
+        prepared.approvals.parked = {"approval-1": "call-1"}
+        result = MagicMock(output=DeferredToolRequests())
+        result.all_messages = MagicMock(return_value=[])
+        prepared.built.agent.run = AsyncMock(return_value=result)
+
+        with (
+            patch.object(service, "prepare", new=AsyncMock(return_value=prepared)),
+            patch("app.services.agent_runner.agent_run_repo.finish_run", new=AsyncMock()) as finish,
+        ):
+            await service.execute(_ctx(), uuid.uuid4(), "animate the logo")
+
+        stored = finish.call_args.kwargs["paused_state"]["generated_files"]
+        assert stored == ["a1_image.png", "b2_video.mp4"]
 
     @pytest.mark.anyio
     async def test_the_plan_the_turn_ended_on_is_written_to_its_conversation(self):
@@ -3280,7 +3378,7 @@ class TestResume:
         """Review on #2062: after an approval every request was told the
         approver's name, email and departments - a visitor's agent the admin's."""
         with patch.object(AgentRunnerService, "_variable_renderer", autospec=True) as renderer:
-            renderer.return_value = lambda spec: spec
+            renderer.return_value = _RunRendering(variables=lambda spec: spec, person=None)
             await self._resumed(paused_state={"messages": [], "tool_call_ids": {}})
 
         told_about = renderer.call_args.args[1]
@@ -4821,6 +4919,72 @@ class TestTheBrowsersStepModel:
 
         assert BROWSER_STEP_MODEL_RESOURCE not in resources
 
+    @pytest.mark.anyio
+    async def test_a_named_model_writes_the_next_steps(self):
+        """A small model of its own writes the steps after the answer (#2301)."""
+        profile = uuid.uuid4()
+        spec = AgentSpec(
+            name="Helper",
+            capabilities=[{"id": "follow_ups", "config": {"model_profile_id": str(profile)}}],
+        )
+
+        resources, resolve = await self._built(spec)
+
+        assert FOLLOW_UPS_MODEL_RESOURCE in resources
+        assert profile in [call.kwargs.get("profile_id") for call in resolve.await_args_list]
+
+    @pytest.mark.anyio
+    async def test_a_next_steps_model_that_no_longer_resolves_leaves_them_to_the_agent(self):
+        gone = uuid.uuid4()
+        spec = AgentSpec(
+            name="Helper",
+            capabilities=[{"id": "follow_ups", "config": {"model_profile_id": str(gone)}}],
+        )
+
+        def resolve(ctx, profile_id=None):
+            if profile_id == gone:
+                raise NotFoundError(message="Model profile not found")
+            return MagicMock(label="m", build=MagicMock())
+
+        built, _ = await self._built_call(spec, resolve=resolve)
+
+        assert FOLLOW_UPS_MODEL_RESOURCE not in built.kwargs["resources"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "capabilities",
+        [
+            [{"id": "follow_ups"}],
+            [
+                {
+                    "id": "follow_ups",
+                    "enabled": False,
+                    "config": {"model_profile_id": str(uuid.uuid4())},
+                }
+            ],
+        ],
+    )
+    async def test_without_one_the_agent_offers_the_next_steps_itself(self, capabilities):
+        resources, _ = await self._built(AgentSpec(name="Helper", capabilities=capabilities))
+
+        assert FOLLOW_UPS_MODEL_RESOURCE not in resources
+
+
+class TestNextStepsWrittenAfterTheAnswer:
+    """Recorded as the agent's own `suggest_next_steps` call would be (#2301)."""
+
+    def test_they_are_recorded_as_the_call_a_channel_reads(self):
+        deps = AgentDeps(next_steps=WrittenNextSteps(call_id="next_steps_1", steps=["Again"]))
+
+        (call,) = _written_next_steps(deps)
+
+        assert call.tool_name == "suggest_next_steps"
+        assert call.tool_call_id == "next_steps_1"
+        assert json.loads(call.result or "") == {"steps": ["Again"]}
+
+    def test_none_written_records_nothing(self):
+        assert _written_next_steps(AgentDeps()) == []
+
 
 class TestTheDownRatedMarker:
     """The set run history draws its 👎 from.
@@ -5902,8 +6066,299 @@ class TestAFailedRunOverTheApi:
             await service.execute(_ctx(), uuid.uuid4(), "hi", reports_failure=True)
 
     @pytest.mark.anyio
+    async def test_pool_exhaustion_reaches_the_busy_handler_without_reading_an_expired_run(self):
+        from unittest.mock import PropertyMock
+
+        from sqlalchemy.exc import PendingRollbackError
+        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+        failure = PoolTimeoutError("pool exhausted")
+        service, run = self._service(failure)
+        with (
+            patch.object(
+                type(run),
+                "id",
+                PropertyMock(side_effect=PendingRollbackError("expired after failed flush")),
+                create=True,
+            ),
+            pytest.raises(PoolTimeoutError) as raised,
+        ):
+            await service.execute(_ctx(), uuid.uuid4(), "hi", reports_failure=True)
+
+        assert raised.value is failure
+
+    @pytest.mark.anyio
     async def test_other_surfaces_keep_the_original_exception(self):
         service, _run = self._service(RuntimeError("boom"))
 
         with pytest.raises(RuntimeError):
             await service.execute(_ctx(), uuid.uuid4(), "hi")
+
+
+@pytest.mark.anyio
+@pytest.mark.security
+class TestCancelParkedRun:
+    @pytest.mark.parametrize("status", [RunStatus.AWAITING_ANSWER, RunStatus.AWAITING_APPROVAL])
+    async def test_it_stops_a_parked_run_without_a_model_call_and_preserves_its_spend(self, status):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        run = _parked_run(
+            user_id=ctx.user_id,
+            status=status.value,
+            paused_state={
+                "messages": [],
+                "tool_call_ids": {"a-1": "tool-1"},
+                "questions": ["ask-1"],
+            },
+        )
+        db = _db()
+        service = AgentRunnerService(db)
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ) as claim,
+            patch(
+                "app.services.agent_runner.agent_run_repo.expire_pending_approvals", AsyncMock()
+            ) as expire,
+            patch("app.services.agent_runner.agent_run_repo.finish_run", AsyncMock()) as finish,
+            patch.object(service.transcript, "record", AsyncMock()) as recorded,
+            patch("app.services.agent_runner.record_audit", AsyncMock()) as audit,
+        ):
+            await service.cancel_parked(ctx, run.id)
+        claim.assert_awaited_once_with(db, run.id, organization_id=ctx.organization_id)
+        assert set(recorded.await_args.kwargs["settled"]) == {"ask-1", "tool-1"}
+        assert finish.await_args.kwargs["status"] == RunStatus.CANCELLED.value
+        assert finish.await_args.kwargs["paused_state"] is None
+        assert finish.await_args.kwargs["cost_usd"] == run.cost_usd
+        assert finish.await_args.kwargs["input_tokens"] == run.input_tokens
+        assert finish.await_args.kwargs["output_tokens"] == run.output_tokens
+        assert finish.await_args.kwargs["cost_is_partial"] == run.cost_is_partial
+        expire.assert_awaited_once()
+        assert audit.await_args.kwargs["actor_user_id"] == ctx.user_id
+
+    async def test_a_foreign_or_missing_run_is_not_found(self):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        service = AgentRunnerService(_db())
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=None),
+            ),
+            pytest.raises(NotFoundError),
+        ):
+            await service.cancel_parked(ctx, uuid.uuid4())
+
+    @pytest.mark.parametrize("status", [RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.FAILED])
+    async def test_an_active_or_finished_run_is_not_rewritten(self, status):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        run = _parked_run(user_id=ctx.user_id, status=status.value)
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ),
+            pytest.raises(BadRequestError),
+        ):
+            await AgentRunnerService(_db()).cancel_parked(ctx, run.id)
+
+    async def test_a_second_stop_of_the_same_run_is_idempotent(self):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        run = _parked_run(user_id=ctx.user_id, status=RunStatus.CANCELLED.value)
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ),
+            patch("app.services.agent_runner.agent_run_repo.finish_run", AsyncMock()) as finish,
+        ):
+            await AgentRunnerService(_db()).cancel_parked(ctx, run.id)
+        finish.assert_not_awaited()
+
+    async def test_someone_elses_question_cannot_be_stopped(self):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        run = _parked_run(user_id=uuid.uuid4(), status=RunStatus.AWAITING_ANSWER.value)
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ),
+            pytest.raises(AuthorizationError),
+        ):
+            await AgentRunnerService(_db()).cancel_parked(ctx, run.id)
+
+    async def test_a_key_cannot_stop_a_persons_run(self):
+        ctx = AuthContext(
+            user_id=uuid.uuid4(),
+            organization_id=uuid.uuid4(),
+            role="owner",
+            api_key_id=uuid.uuid4(),
+        )
+        with pytest.raises(AuthorizationError):
+            await AgentRunnerService(_db()).cancel_parked(ctx, uuid.uuid4())
+
+    @pytest.mark.parametrize("role,allowed", [("member", False), ("admin", True)])
+    @pytest.mark.parametrize("state", [None, {"messages": [], "tool_call_ids": {}}])
+    async def test_only_an_approval_decider_can_stop_another_persons_approval(
+        self, role, allowed, state
+    ):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=role)
+        run = _parked_run(user_id=uuid.uuid4(), paused_state=state)
+        service = AgentRunnerService(_db())
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ),
+            patch("app.services.agent_runner.agent_run_repo.expire_pending_approvals", AsyncMock()),
+            patch("app.services.agent_runner.agent_run_repo.finish_run", AsyncMock()) as finish,
+            patch.object(service.transcript, "record", AsyncMock()) as recorded,
+            patch("app.services.agent_runner.record_audit", AsyncMock()),
+        ):
+            if allowed:
+                await service.cancel_parked(ctx, run.id)
+                assert recorded.await_args.kwargs["settled"] == {}
+                assert finish.await_args.kwargs["status"] == RunStatus.CANCELLED.value
+            else:
+                with pytest.raises(AuthorizationError):
+                    await service.cancel_parked(ctx, run.id)
+                finish.assert_not_awaited()
+
+    @pytest.mark.parametrize("conversation", [False, True])
+    async def test_stopping_records_parked_delegate_spend_and_puts_the_plan_down(
+        self, conversation
+    ):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="member")
+        delegate, nested, deleted, version = (uuid.uuid4() for _ in range(4))
+        state = {
+            "messages": [],
+            "tool_call_ids": {},
+            "plan": [{"description": "Research", "status": "in_progress"}],
+            "delegations": [
+                {
+                    "tool_call_id": "task-1",
+                    "task_id": "outer",
+                    "subagent": "researcher",
+                    "agent_id": str(delegate),
+                    "agent_version_id": str(version),
+                    "cost_usd": "2",
+                    "billed_cost_usd": "3",
+                    "billed_input_tokens": 20,
+                    "billed_output_tokens": 10,
+                    "billed_cache_read_tokens": 4,
+                    "billed_cache_write_tokens": 5,
+                    "billed_cost_is_partial": True,
+                    "started_at": "2026-10-24T01:00:00Z",
+                    "delegations": [
+                        {
+                            "tool_call_id": "inline",
+                            "task_id": "inline",
+                            "subagent": "inline",
+                            "delegations": [
+                                {
+                                    "tool_call_id": "nested",
+                                    "task_id": "nested",
+                                    "subagent": "nested",
+                                    "agent_id": str(nested),
+                                    "agent_version_id": str(version),
+                                    "cost_usd": "1",
+                                    "input_tokens": 7,
+                                    "output_tokens": 8,
+                                    "cost_is_partial": False,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "tool_call_id": "deleted",
+                    "task_id": "deleted",
+                    "subagent": "gone",
+                    "agent_id": str(deleted),
+                    "agent_version_id": str(version),
+                },
+                {
+                    "tool_call_id": "unpublished",
+                    "task_id": "unpublished",
+                    "subagent": "draft",
+                    "agent_id": str(delegate),
+                },
+            ],
+        }
+        run = _parked_run(
+            user_id=ctx.user_id,
+            organization_id=ctx.organization_id,
+            conversation_id=uuid.uuid4() if conversation else None,
+            paused_state=state,
+        )
+        service = AgentRunnerService(_db())
+        with (
+            patch(
+                "app.services.agent_runner.agent_run_repo.claim_parked_run",
+                AsyncMock(return_value=run),
+            ),
+            patch(
+                "app.services.agent_runner.agent_repo.existing_ids_locked",
+                AsyncMock(return_value={delegate, nested}),
+            ),
+            patch(
+                "app.services.agent_runner.agent_run_repo.record_delegated_run", AsyncMock()
+            ) as recorded,
+            patch("app.services.agent_runner.agent_run_repo.expire_pending_approvals", AsyncMock()),
+            patch("app.services.agent_runner.agent_run_repo.finish_run", AsyncMock()),
+            patch("app.services.agent_runner.record_audit", AsyncMock()),
+            patch.object(service.transcript, "record", AsyncMock()) as transcript,
+            patch("app.services.agent_runner.ConversationService.keep_plan", AsyncMock()) as plan,
+        ):
+            await service.cancel_parked(ctx, run.id)
+        rows = {call.kwargs["subagent_task_id"]: call.kwargs for call in recorded.await_args_list}
+        assert set(rows) == {"outer", "nested"}
+        assert rows["outer"]["cost_usd"] == Decimal("3")
+        assert rows["outer"]["input_tokens"] == 20
+        assert rows["outer"]["cache_read_tokens"] == 4
+        assert rows["outer"]["cache_write_tokens"] == 5
+        assert rows["outer"]["cost_is_partial"] is True
+        assert rows["nested"]["cost_usd"] == Decimal("1")
+        assert rows["nested"]["input_tokens"] == 7
+        assert rows["nested"]["output_tokens"] == 8
+        assert all(row["status"] == RunStatus.CANCELLED.value for row in rows.values())
+        assert "task-1" in transcript.await_args.kwargs["settled"]
+        if conversation:
+            plan.assert_awaited_once_with(
+                run.conversation_id, [{"description": "Research", "status": "pending"}]
+            )
+        else:
+            plan.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "role,own,status,allowed",
+        [
+            ("member", True, "awaiting_approval", True),
+            ("member", True, "awaiting_answer", True),
+            ("member", True, "completed", False),
+            ("member", False, "awaiting_approval", False),
+            ("admin", False, "awaiting_approval", True),
+            ("admin", False, "awaiting_answer", False),
+        ],
+    )
+    async def test_stopping_authority_is_separate_from_deciding_approvals(
+        self, role, own, status, allowed
+    ):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=role)
+        run = _parked_run(user_id=ctx.user_id if own else uuid.uuid4(), status=status)
+        with patch(
+            "app.services.agent_runner.agent_run_repo.get_run", AsyncMock(return_value=run)
+        ) as read:
+            assert await AgentRunnerService(_db()).can_stop_parked(ctx, run.id) is allowed
+        assert read.await_args.kwargs["organization_id"] == ctx.organization_id
+
+    async def test_stopping_authority_reveals_no_foreign_run_and_refuses_keys(self):
+        ctx = AuthContext(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role="owner")
+        service = AgentRunnerService(_db())
+        with patch(
+            "app.services.agent_runner.agent_run_repo.get_run", AsyncMock(return_value=None)
+        ):
+            assert await service.can_stop_parked(ctx, uuid.uuid4()) is False
+        assert (
+            await service.can_stop_parked(replace(ctx, api_key_id=uuid.uuid4()), uuid.uuid4())
+            is False
+        )

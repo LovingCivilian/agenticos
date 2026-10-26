@@ -1,5 +1,5 @@
 ---
-source_sha: "e5f62723a4c7"
+source_sha: "2c8dd98fbd6f"
 title: "Conversaciones de voz"
 seo_title: "Conversaciones de voz: habla con un agent publicado"
 description: "Llama a un agent publicado y habla con él: modelos realtime, aprobaciones en la llamada, límites de tiempo y budgets, redes de seguridad y transcripciones."
@@ -29,6 +29,11 @@ controles de aprobación, y el widget carga una propia, más pequeña. Ver
 [Consola](console.md#voice-calls) y
 [Canales](channels.md#voice-calls-on-a-widget-or-a-hosted-page).
 
+Cambiar de organización o cuenta finaliza la llamada de la consola y cancela
+la preparación y las reconexiones pendientes. Si el permiso del micrófono llega
+después, sus pistas se detienen sin abrir la llamada de la organización anterior.
+Las inserciones públicas conservan su ámbito independiente de visitante.
+
 ## Activarlo { #turn-it-on }
 
 **Las llamadas se activan en el agent.** La organización no tiene ajustes de
@@ -50,10 +55,13 @@ sección, fuera de los budgets como un dictado, así que se limita por persona
 (`RATE_LIMIT_VOICE_PREVIEW_PER_MINUTE`) y queda en caché una semana por voz e
 idioma.
 
-**Todo agent ofrece el botón.** En `/chat` el botón de llamada está junto al
-micrófono en cada agent. Para uno sin voz, o con una clave que ya no puede
+**Todo agent ofrece el botón.** En `/chat` el botón de llamada ocupa el lugar
+de Enviar mientras el cuadro está vacío, y Enviar vuelve en cuanto se escribe algo,
+en cada agent. Para uno sin voz, o con una clave que ya no puede
 mantener una llamada, aparece tachado, y su motivo lleva a quien puede editar el
-agent a la pestaña de llamadas de su tarjeta Voice.
+agent a la pestaña de llamadas de su tarjeta Voice. La ventana del Architect y el
+panel de pruebas del Builder lo ofrecen igual; en el panel de pruebas la llamada
+ejecuta la versión publicada, no el borrador que se prueba, y el botón lo dice.
 
 **El embed.** Un widget o una página alojada ofrecen llamadas solo cuando su
 propio interruptor «Voice calls» está activado. Guardar el interruptor activado
@@ -148,12 +156,12 @@ Eso la llamada lo pasa al modelo de texto propio del agent.
 
 | Por voz | Capabilities |
 |---|---|
-| Tal cual | reloj (la hora de las instrucciones queda fijada cuando se conecta la llamada), contexto, conocimiento, investigación web, lectura de páginas web, gráficos, artefactos, ejecución de código, búsqueda de conversaciones, archivos de memoria, memoria mem0, planificación, límites de salida de herramientas, generación de imágenes |
+| Tal cual | reloj (la hora de las instrucciones queda fijada cuando se conecta la llamada), contexto, conocimiento, investigación web, lectura de páginas web, gráficos, artefactos, ejecución de código, búsqueda de conversaciones, archivos de memoria, memoria mem0, planificación, límites de salida de herramientas, generación de imágenes, texto a voz |
 | En pantalla | preguntar al usuario: en `/chat` la tarjeta de preguntas aparece en la vista de la llamada y además se lee en voz alta; quien llama toca una respuesta o la dice. Una llamada desde un widget o una página alojada no la recibe |
 | Adaptada | skills: se cargan como instrucciones bajo demanda, sin las herramientas que usa un run de texto para leerlos |
 | Eliminada | búsqueda de herramientas: las herramientas MCP que habría diferido se pasan directamente a la llamada |
 | Traducida | razonamiento (thinking): se convierte en el ajuste de razonamiento propio del modelo realtime, cuando el modelo lo tiene |
-| Delegada | sandbox, automatización del navegador, subagents, el coding agent, trabajar mientras corren herramientas: lo hace el modelo de texto del agent, ver [Pasar trabajo](#handing-work-off) |
+| Delegada | sandbox, automatización del navegador, subagents, el coding agent, generación de vídeo, trabajar mientras corren herramientas: lo hace el modelo de texto del agent, ver [Pasar trabajo](#handing-work-off) |
 
 La tarjeta Voice del Builder enumera las capabilities que este agent pasa a su
 modelo de texto en las llamadas.

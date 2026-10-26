@@ -1,5 +1,5 @@
 ---
-source_sha: "4fe91aa6f038"
+source_sha: "bb212f4c1701"
 ---
 
 # Begriffe { #concepts }
@@ -75,14 +75,20 @@ Der Spec hält zwei Regeln ein, und sie sind es, die ihn nützlich machen.
 
 **Ein eingefrorener Spec.**
 
-Das Veröffentlichen kopiert den Draft in eine Version und richtet den Agent
-darauf aus. Runs halten fest, welche Version ausgeführt wurde.
+Das Veröffentlichen kopiert den Draft in eine Version. Umgebungen bestimmen,
+welche Version eine Oberfläche bedient. Runs halten die ausgeführte Version fest.
 
 Deshalb bleibt *was hat dieser Agent letzten Dienstag getan* auch nach einem
 Dutzend Bearbeitungen beantwortbar. Deshalb veröffentlicht ein Rollback auch eine
 **neue** Version, kopiert aus der alten, statt Historie zu löschen — die
 Zeitleiste zeigt, dass ein Rollback stattgefunden hat, statt so zu tun, als habe
 es die schlechte Version nie gegeben.
+
+Draft-Speicherung, Veröffentlichung, Rollback und Umgebungsänderungen werden pro
+Agent nacheinander ausgeführt. Eine Speicherung, die auf eine Veröffentlichung
+wartet, bleibt danach als Draft erhalten. Gleichzeitige Veröffentlichungen
+erhalten eigene Versionsnummern. Die Standardumgebung und die ausführbare Version
+des Agenten bleiben synchron. Neue Runs können während der Validierung starten.
 
 ### Environments { #environments }
 
@@ -209,9 +215,10 @@ nicht kann — zu diesen Bedingungen:
   niemand geprüft hat, und eine daraus geschriebene Notiz würde jeder spätere Chat
   als die eigene des Erstellers lesen.
 - **Frühere Gespräche bleiben verschlossen**, so oder so.
-- **Die Änderung eines anderen schaltet es aus.** Wer die Nachricht, die Umgebung
-  oder den Filter eines Triggers ändert, den er nicht angelegt hat, schaltet es
-  aus, sodass niemand umschreibt, was als Sie läuft. Ein Administrator, der per
+- **Die Änderung eines anderen schaltet es aus.** Wer die Nachricht, die Umgebung,
+  den Filter oder den Teams-Kanal eines Triggers ändert, den er nicht angelegt
+  hat, schaltet es aus, sodass niemand umschreibt, was als Sie läuft, oder die
+  Antwort woandershin schickt. Ein Administrator, der per
   Impersonation als Sie handelt, oder ein Skript mit Ihrem API-Schlüssel kann es
   nicht einschalten.
 - **Ebenso eine neue Version, die du nicht selbst veröffentlicht hast.** Eine
@@ -245,7 +252,9 @@ genutzt* einen unbeaufsichtigten Run von dem einer Person unterscheiden kann.
 Jedes Auslösen ist ein eigener Run in Activity, und seine Antworten sammeln sich
 in einer Run-Log-Unterhaltung, die der Trigger einmal eröffnet — sofort, sobald
 der Trigger angelegt ist, sodass er ein anklickbarer Eintrag ist, bevor er je
-ausgelöst hat.
+ausgelöst hat. Ein Trigger kann außerdem jede Antwort in einem Teams-Channel oder
+Gruppenchat posten, in dem der Bot seiner Organisation ist
+([Microsoft Teams](channels.md#microsoft-teams)).
 
 ### Zwei Arten auszulösen { #two-ways-to-fire }
 
