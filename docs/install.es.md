@@ -1,5 +1,5 @@
 ---
-source_sha: "67b5c3162745"
+source_sha: "d4203a010ad0"
 ---
 
 # Instalación { #install }
@@ -48,6 +48,22 @@ paso suyo que tú no puedas dar.
 
     El Makefile y los ayudantes de shell dan por hecho bash. **WSL2** o **Git
     Bash**. Una vez dentro de uno de los dos, todo lo de abajo es idéntico.
+
+!!! note "Cookies de inicio de sesión y hosts compartidos"
+
+    La consola usa las cookies `agenticos_access_token` y
+    `agenticos_refresh_token` para evitar que aplicaciones con nombres de cookies
+    genéricos las sobrescriban por accidente. Tras actualizar desde los nombres
+    antiguos, vuelve a iniciar sesión una vez. La migración
+    `0173_revoke_cookie_sessions.py` termina las sesiones existentes, incluidas
+    las cadenas de renovación rotadas y las suplantaciones. Los clientes de API
+    basados en sesiones también deben volver a iniciar sesión; las claves de API
+    no cambian. Una reversión no reactiva las sesiones revocadas.
+
+    Asigna nombres de host distintos a las aplicaciones independientes. Las
+    cookies se comparten entre los puertos del mismo nombre de host; los nombres
+    específicos de cada aplicación evitan colisiones accidentales, pero no
+    impiden que otra aplicación en ese mismo nombre de host reciba tus tokens.
 
 ## Ejecútalo desde las imágenes publicadas { #run-it-from-the-published-images }
 
@@ -180,18 +196,23 @@ esto recorre esa cadena una vez:
 | Un propietario | `admin@example.com` / `admin123`, o `--email` / `--password` |
 | Una entrada en el vault | Tu clave de provider, sellada para esa organización |
 | Un perfil de modelo | `gpt-4.1`, `claude-sonnet-4-6`, `gemini-2.5-pro` o `openai/gpt-4.1`, según de qué provider sea la clave |
-| Dos agents | El **Architect**, en la esquina de cada página, y **Claude Code like**, ambos publicados si hay una clave |
+| Dos agents | El **Architect**, en la esquina de cada página, y **AgenticOS**, ambos publicados si hay una clave |
 
 Ahora abre <http://localhost:3000>, inicia sesión como `admin@example.com` /
-`admin123` y pregunta algo a cualquiera de los dos: a **Claude Code like** en
+`admin123` y pregunta algo a cualquiera de los dos: a **AgenticOS** en
 **Chat**, o al **Architect** desde la esquina de cualquier página.
 
-Claude Code like es un agent de uso general: lee antes de actuar, planifica un
-trabajo de varios pasos, edita archivos y ejecuta comandos en su sandbox, investiga
-en la web, delega en sus especialistas y comprueba lo que hizo. El Architect conoce
-esta plataforma: encuentra agents, runs y bases de conocimiento, explica por qué
-falló un run y cuánto costó, y prepara un agent o una base de conocimiento para que
-lo apruebes.
+AgenticOS es un agent de uso general: lee antes de actuar, planifica un trabajo de
+varios pasos, edita archivos y ejecuta comandos en su sandbox, investiga en la web,
+delega en sus especialistas y comprueba lo que hizo. Por el camino también te
+enseña lo que hace la plataforma: ofrece una rutina cuando una petición va a
+volver, dice qué podría hacer si se encendiera una capability, recuerda tus
+preferencias y cambia el idioma de la consola cuando se lo pides. Cada agent que
+creas desde cero empieza como una copia suya.
+
+El Architect construye agents contigo, una decisión cada vez, desde lo que el
+agent debe hacer hasta un agent probado y publicado; también encuentra agents,
+runs y bases de conocimiento, y explica por qué falló un run y cuánto costó.
 
 Abre cualquiera de los dos en el Builder para ver cómo: cada una de esas cosas es
 una capability que alguien encendió, y las instrucciones del agent son un campo de
@@ -204,8 +225,8 @@ texto que puedes cambiar.
     responder, y publicar uno que falla en su primer mensaje es peor que no
     publicarlo.
 
-    Añade una clave en **Settings → AI providers** y después publica Claude Code
-    like. El Architect se publica solo con el primer modelo de la organización.
+    Añade una clave en **Settings → AI providers** y después publica AgenticOS. El
+    Architect se publica solo con el primer modelo de la organización.
 
 !!! note "`make seed` es otra cosa"
 

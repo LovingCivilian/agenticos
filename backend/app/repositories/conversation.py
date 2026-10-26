@@ -22,7 +22,7 @@ from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.orm import defer, load_only, raiseload, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.db.models.agent import Agent
@@ -188,6 +188,7 @@ async def get_conversation_by_id(
     conversation_id: UUID,
     *,
     include_messages: bool = False,
+    include_summary: bool = False,
 ) -> Conversation | None:
     """Get a conversation by ID without a tenant filter.
 
@@ -196,21 +197,27 @@ async def get_conversation_by_id(
     :meth:`app.services.conversation.ConversationService.get_conversation`, which
     takes the active organization and enforces it. Grep for this function when
     auditing cross-tenant reads.
+
+    The large model summary is excluded and refuses implicit loading unless
+    `include_summary` is requested. Only model-history reconstruction needs it.
     """
-    if include_messages:
+    summary_options = (
+        () if include_summary else (defer(Conversation.summary_messages, raiseload=True),)
+    )
+    if include_messages or include_summary:
         query = (
-            select(Conversation)
-            .options(
+            select(Conversation).options(*summary_options).where(Conversation.id == conversation_id)
+        )
+        if include_messages:
+            query = query.options(
                 selectinload(Conversation.messages).selectinload(Message.tool_calls),
                 selectinload(Conversation.messages)
                 .selectinload(Message.files)
                 .load_only(*_MESSAGE_FILE_COLUMNS, raiseload=True),
             )
-            .where(Conversation.id == conversation_id)
-        )
         result = await db.execute(query)
         return result.scalar_one_or_none()
-    return await db.get(Conversation, conversation_id)
+    return await db.get(Conversation, conversation_id, options=summary_options)
 
 
 def _list_filters(
@@ -1024,6 +1031,32 @@ async def tool_call_in_conversation(
     return ToolCallArgs(*row) if row is not None else None
 
 
+async def person_requests_since(
+    db: AsyncSession, *, organization_id: UUID, user_id: UUID, since: datetime, limit: int
+) -> list[Message]:
+    """What one person asked agents here since `since`, newest first (#2301).
+
+    Their own messages: written by them in a shared chat, or unattributed in a
+    conversation that is theirs - a one-person chat records no author per turn.
+    """
+    result = await db.execute(
+        select(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Conversation.organization_id == organization_id,
+            Message.role == "user",
+            Message.created_at >= since,
+            or_(
+                Message.author_user_id == user_id,
+                and_(Message.author_user_id.is_(None), Conversation.user_id == user_id),
+            ),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
 async def get_message_by_id(db: AsyncSession, message_id: UUID) -> Message | None:
     """Get message by ID."""
     return await db.get(Message, message_id)
@@ -1036,6 +1069,8 @@ async def get_messages_by_conversation(
     skip: int = 0,
     limit: int = 100,
     include_tool_calls: bool = False,
+    latest: bool = False,
+    before: UUID | None = None,
 ) -> list[Message]:
     """Get messages for a conversation, in the order they were written.
 
@@ -1050,9 +1085,18 @@ async def get_messages_by_conversation(
     query = query.options(
         selectinload(Message.files).load_only(*_MESSAGE_FILE_COLUMNS, raiseload=True)
     )
-    query = query.order_by(Message.ordinal.asc()).offset(skip).limit(limit)
+    if before is not None:
+        boundary = (
+            select(Message.ordinal)
+            .where(Message.id == before, Message.conversation_id == conversation_id)
+            .scalar_subquery()
+        )
+        query = query.where(Message.ordinal < boundary)
+    order = Message.ordinal.desc() if latest else Message.ordinal.asc()
+    query = query.order_by(order).offset(skip).limit(limit)
     result = await db.execute(query)
-    return list(result.scalars().all())
+    items = list(result.scalars().all())
+    return list(reversed(items)) if latest else items
 
 
 async def count_messages(db: AsyncSession, conversation_id: UUID) -> int:
@@ -1335,6 +1379,7 @@ async def create_message(
     conversation_id: UUID,
     role: str,
     content: str,
+    client_message_id: str | None = None,
     thinking: str | None = None,
     parts: list[dict[str, object]] | None = None,
     model_name: str | None = None,
@@ -1359,6 +1404,7 @@ async def create_message(
         conversation_id=conversation_id,
         role=role,
         content=content,
+        client_message_id=client_message_id,
         attachment_context=attachment_context,
         channel_identity_id=channel_identity_id,
         author_user_id=author_user_id,
