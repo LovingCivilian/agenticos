@@ -47,7 +47,7 @@ from app.agents.loop_guard import ToolLoopStopped
 from app.agents.steering import SteeringInbox
 from app.agents.subagent_events import SubagentEventSink
 from app.agents.visual_reports import VisualReports
-from app.core.exceptions import AuthorizationError, BadRequestError
+from app.core.exceptions import AuthorizationError, BadRequestError, RunFailedError
 from app.core.permissions import AuthContext
 from app.db.models.agent_run import RunStatus, RunSurface
 from app.db.models.chat_file import ChatFile
@@ -68,6 +68,7 @@ from app.services.agent_runner import (
 )
 from app.services.attachments import AttachmentRouter
 from app.services.mentions import MentionService, ResolvedMentions
+from app.services.run_heartbeat import run_heartbeat
 from app.services.sandbox_workspace import SandboxWaitSink
 from app.services.usage_report import UsageReport, UsageReportService, context_fill
 
@@ -590,10 +591,12 @@ class ChatAgentRunner:
         await self.db.commit()
         await change_feed.publish_run(prepared.run, "created")
         try:
-            async with prepared.iterate(
-                user_input,
-                message_history=message_history,
-            ) as agent_run:
+            # Stamped alive while the model works, as `AgentRunnerService._run`
+            # does: a restart under this turn ends it in minutes, not hours.
+            async with (
+                run_heartbeat(prepared.run.id),
+                prepared.iterate(user_input, message_history=message_history) as agent_run,
+            ):
                 await stream(agent_run)
 
             result = _outcome(agent_run)
@@ -661,6 +664,9 @@ class ChatAgentRunner:
                     paused_state=paused,
                     budget_scope=budget_scope,
                 )
+                if prepared.run.status == RunStatus.FAILED.value:
+                    status = RunStatus.FAILED
+                    paused = None
                 await self.runner.keep_plan(prepared, status=status)
                 await self.db.commit()
                 await change_feed.publish_run(prepared.run, "updated")
@@ -668,6 +674,9 @@ class ChatAgentRunner:
                 if finished_cleanly:
                     raise
                 logger.exception("Could not persist the terminal state of run %s", prepared.run.id)
+
+        if finished_cleanly and prepared.run.status == RunStatus.FAILED.value:
+            raise RunFailedError(message=prepared.run.error or "The run could not be saved")
 
         return ChatTurn(
             output=output,

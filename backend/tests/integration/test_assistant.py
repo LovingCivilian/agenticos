@@ -108,6 +108,8 @@ async def test_a_viewer_s_first_look_installs_it_and_a_model_publishes_it(
     # Its skills for building agents, installed with it (#2069), and the guide
     # to AgenticOS itself that its questions about the product are answered from.
     assert len(spec.skill_ids) == 8
+    # What the chat offers somebody opening it there with nothing said yet (#2301).
+    assert spec.starters[0] == "Build me an agent that answers questions from our documents"
 
 
 async def test_one_organization_gets_one_assistant(db: AsyncSession) -> None:
@@ -314,6 +316,7 @@ async def test_a_deployment_with_a_sandbox_gives_it_files_and_code(
     """Reading a pasted agent and running it needs one (#2069, #2070)."""
     from unittest.mock import AsyncMock, MagicMock
 
+    from app.agents.capabilities.sandbox import SandboxConfig
     from app.services.sandbox_connection import SandboxConnectionService
 
     monkeypatch.setattr(
@@ -328,4 +331,7 @@ async def test_a_deployment_with_a_sandbox_gives_it_files_and_code(
     sandbox = [
         b for b in AgentSpec.model_validate(agent.draft_spec).capabilities if b.id == "sandbox"
     ]
-    assert sandbox and sandbox[0].config == {"include_execute": True}
+    assert sandbox
+    config = SandboxConfig.model_validate(sandbox[0].config)
+    assert config.backend == "service"
+    assert config.include_execute

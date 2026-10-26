@@ -56,6 +56,7 @@ from app.services import chat_room
 from app.services.access import AGENT, PROJECT, resolve_access, visible_resource_ids
 from app.services.channels import membership as channel_membership
 from app.services.file_storage import delete_files_best_effort, delete_prefix_best_effort
+from app.services.generated_media import GeneratedMediaService
 from app.services.message_history import HistoryMessage, build_message_history
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,9 @@ class ConversationService:
         before the run so a refusal cannot lose it, so it is a row by the time
         this reads - and left in, the model is asked the same question twice.
         """
-        conversation = await conversation_repo.get_conversation_by_id(self.db, conversation_id)
+        conversation = await conversation_repo.get_conversation_by_id(
+            self.db, conversation_id, include_summary=True
+        )
         summary = None if conversation is None else conversation.summary_messages
         if conversation is None or summary is None or conversation.summary_ordinal is None:
             return await self._from_transcript(
@@ -1191,6 +1194,9 @@ class ConversationService:
     ) -> None:
         """Delete, once the transaction commits, what these threads keep outside the database.
 
+        Their attachments, the media their agents generated, and what the
+        `media` capability offloaded out of their compacted history.
+
         Called before the threads are deleted: the attachments' paths are read
         from rows that cascade away with them - see :meth:`delete_conversation`.
         """
@@ -1199,6 +1205,11 @@ class ConversationService:
             for conversation_id in conversation_ids
             for path in await personal_data_repo.attachment_paths_in(self.db, conversation_id)
         ]
+        # And the images, speech and video its agents generated (#2310). Their
+        # rows go now, in this transaction, with a job queued beside them for
+        # the bytes - the rows are their only record, so the unlink must not be
+        # lost to a restart the way a spawned task can be.
+        await GeneratedMediaService(self.db).forget_conversations(organization_id, conversation_ids)
         if attachments:
             spawn_after_commit(
                 self.db,
@@ -1231,6 +1242,8 @@ class ConversationService:
         *,
         skip: int = 0,
         limit: int = 100,
+        latest: bool = False,
+        before: UUID | None = None,
         organization_id: UUID,
         include_tool_calls: bool = False,
         user_id: UUID | None = None,
@@ -1268,6 +1281,8 @@ class ConversationService:
             skip=skip,
             limit=limit,
             include_tool_calls=include_tool_calls,
+            latest=latest,
+            before=before,
         )
         total = await conversation_repo.count_messages(self.db, conversation_id)
         await self._attach_senders(items, conversation)
@@ -1382,6 +1397,7 @@ class ConversationService:
             conversation_id=conversation_id,
             role=data.role,
             content=data.content,
+            client_message_id=data.client_message_id,
             thinking=data.thinking,
             # Dumped without its empty fields, so a text part is `{"type": "text",
             # "text": ...}` rather than that plus a null `tool_call_id`. What comes

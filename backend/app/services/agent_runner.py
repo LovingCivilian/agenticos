@@ -51,6 +51,7 @@ agent already resolved, and a recorder that writes one row.
 """
 
 import asyncio
+import json
 import logging
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
@@ -89,6 +90,7 @@ from pydantic_ai.workspaces import Workspace
 from pydantic_ai_harness.ask_user import DECLINED, AskUserRequest, ask_user_result
 from pydantic_ai_harness.ask_user import TOOL_NAME as ASK_USER_TOOL
 from pydantic_ai_harness.guardrails import GuardrailResult
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import prompt_variables
@@ -132,6 +134,11 @@ from app.agents.capabilities.channel_tools import (
 )
 from app.agents.capabilities.coding_agent import CODING_AGENT_ID
 from app.agents.capabilities.context import CONTEXT_FILES_RESOURCE
+from app.agents.capabilities.follow_ups import (
+    FOLLOW_UPS_CAPABILITY_ID,
+    FOLLOW_UPS_MODEL_RESOURCE,
+    FollowUpsConfig,
+)
 from app.agents.capabilities.guardrails import (
     GuardrailBlocked,
     GuardrailsConfig,
@@ -173,6 +180,7 @@ from app.agents.manifest import RunRecorder, as_payload, carried_over, fit
 from app.agents.mcp import PLATFORM_MCP_PREFIX, unreachable_briefing
 from app.agents.model_resolver import ModelRequestSpec
 from app.agents.observability import current_trace_id
+from app.agents.person_briefing import Person, with_person
 from app.agents.spec import (
     AgentSpec,
     CapabilityBindingSpec,
@@ -204,6 +212,7 @@ from app.agents.subagent_runtime import (
     SubagentRuntime,
 )
 from app.agents.voice import VoiceOptions, handed_off, without_voice_unavailable
+from app.core.audit import record_audit
 from app.core.config import settings
 from app.core.exceptions import (
     AppException,
@@ -246,6 +255,7 @@ from app.repositories import (
 from app.repositories.agent_run import AgentSpendRow, RunFilters
 from app.repositories.voice_call import VoiceChain
 from app.schemas.agent import ParkedCall, ParkedQuestion
+from app.schemas.user import WorkingHours
 from app.services import change_feed
 from app.services.agent_registry import (
     DEFAULT_GRANTED_SCOPES,
@@ -279,11 +289,13 @@ from app.services.notifications import NotificationService
 from app.services.organization import OrganizationService
 from app.services.organization_secret import OrganizationSecretService
 from app.services.project import ProjectService
+from app.services.run_heartbeat import run_heartbeat
 from app.services.sandbox_workspace import (
     SANDBOX_CAPABILITY_ID,
     OpenWorkspace,
     SandboxWaitSink,
     SandboxWorkspaceService,
+    WorkspaceFlushFailure,
     project_sandbox,
 )
 from app.services.skill_proposal import SkillProposalService
@@ -292,6 +304,7 @@ from app.services.skill_workspace import materialise as materialise_skills
 from app.services.skills import SkillService
 from app.services.spend import month_start, organization_monthly_spend
 from app.services.transcript import (
+    STOPPED_TOOL_RESULT,
     RecordedToolCall,
     TranscriptService,
     settled_calls_in,
@@ -772,6 +785,15 @@ class PausedRunState(BaseModel):
             "without the capability, and for one parked before this existed"
         ),
     )
+    generated_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The generated files this run's own tools stored before it parked, by leaf "
+            "name. A file reaches `generate_video` as a starting image only if the run "
+            "made it, and a resume builds fresh deps - so without this a clip approved "
+            "after parking could not start from the picture drawn before it"
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -998,6 +1020,24 @@ def _delegation_frames(
         ]
 
     return frames(by_parent.get(None, []))
+
+
+@dataclass(frozen=True)
+class _RunRendering:
+    """What a run fills into instructions: its `{{variables}}`, and its person.
+
+    Two halves because they reach different agents. Every agent in the run reads
+    the same variables (#2065); only the run's own agent is talking to the
+    person (#2301) - a delegate answers that agent, and telling it "the person
+    you are talking to" would be untrue.
+    """
+
+    variables: Callable[[AgentSpec], AgentSpec]
+    person: Person | None
+
+    def for_the_run(self, spec: AgentSpec) -> AgentSpec:
+        """`spec` as the run's own agent reads it: variables filled, the person after."""
+        return with_person(self.variables(spec), self.person)
 
 
 @dataclass(frozen=True)
@@ -2387,6 +2427,31 @@ def _browser_step_profile(spec: AgentSpec) -> UUID | None:
     return None
 
 
+def _follow_ups_profile(spec: AgentSpec) -> UUID | None:
+    """The model profile the agent named for writing its next steps, if it named one."""
+    for binding in spec.capabilities:
+        if binding.id == FOLLOW_UPS_CAPABILITY_ID and binding.enabled:
+            return FollowUpsConfig.model_validate(binding.config).model_profile_id
+    return None
+
+
+def _written_next_steps(deps: AgentDeps) -> list[RecordedToolCall]:
+    """The next steps a model of the follow-ups capability's own wrote, as the call
+    the agent would otherwise have made - so a channel offers them as buttons and
+    the run history shows them, exactly as it does the agent's own (#2301)."""
+    written = deps.next_steps
+    if written is None:
+        return []
+    return [
+        RecordedToolCall(
+            tool_call_id=written.call_id,
+            tool_name="suggest_next_steps",
+            args={"steps": written.steps},
+            result=json.dumps({"steps": written.steps}, ensure_ascii=False),
+        )
+    ]
+
+
 def _key_may_continue(ctx: AuthContext, run: AgentRun) -> bool:
     """Whether an organization key may read and answer the questions of its issuer's run.
 
@@ -2433,8 +2498,9 @@ class AgentRunnerService:
         surface: RunSurface,
         user_name: str | None,
         person_time_zone: str | None,
-    ) -> Callable[[AgentSpec], AgentSpec]:
-        """What fills `{{variables}}` for this run, the same for every agent in it (#2065).
+    ) -> _RunRendering:
+        """What fills `{{variables}}` for this run, the same for every agent in it (#2065),
+        and the person the run's own agent is told about (#2301).
 
         The person is the run's real subject. A publisher standing in for an
         unidentified asker is not named - their name and address are not the
@@ -2462,10 +2528,29 @@ class AgentRunnerService:
             groups=tuple(groups),
         )
 
-        def render(spec: AgentSpec) -> AgentSpec:
-            return prompt_variables.render(spec, facts, person_zone=person_time_zone)
+        # The account's own zone when the surface did not send one - a schedule, a
+        # channel - so "9:00" in a routine is still the person's 9:00 (#2301).
+        zone = person_time_zone or (person.time_zone if person is not None else None)
+        about = (
+            Person(
+                locale=person.locale,
+                time_zone=zone,
+                job_title=person.job_title,
+                about=person.about,
+                working_hours=(
+                    WorkingHours.model_validate(person.working_hours)
+                    if isinstance(person.working_hours, dict)
+                    else None
+                ),
+            )
+            if person is not None
+            else None
+        )
 
-        return render
+        def render(spec: AgentSpec) -> AgentSpec:
+            return prompt_variables.render(spec, facts, person_zone=zone)
+
+        return _RunRendering(variables=render, person=about)
 
     async def _run_owner_context(
         self, ctx: AuthContext, existing_run: AgentRun | None
@@ -2905,7 +2990,7 @@ class AgentRunnerService:
         # `period_spend` below - reading the same organization.
         organization = await self.organizations.get_by_id(ctx.organization_id)
 
-        render_variables = await self._variable_renderer(
+        rendering = await self._variable_renderer(
             # Who the run is about: on a resume `ctx` is the approver's, and the
             # agent was told the person who started it - their name and address,
             # or "a visitor" - before it parked.
@@ -2921,7 +3006,7 @@ class AgentRunnerService:
             user_name=user_name,
             person_time_zone=person_time_zone,
         )
-        spec = render_variables(spec)
+        spec = rendering.for_the_run(spec)
 
         # Everything a capability needs but must not fetch itself. Resolved once,
         # server-side, so the model cannot influence what an agent reaches.
@@ -2971,6 +3056,19 @@ class AgentRunnerService:
             resources[BROWSER_STEP_MODEL_RESOURCE] = (
                 await self.models.resolve(models_ctx, profile_id=step_profile)
             ).build()
+        follow_ups_profile = _follow_ups_profile(spec)
+        if follow_ups_profile is not None:
+            # Optional to the run, as a reviewer's model is: one that no longer
+            # resolves leaves the agent offering the steps itself.
+            try:
+                resources[FOLLOW_UPS_MODEL_RESOURCE] = (
+                    await self.models.resolve(models_ctx, profile_id=follow_ups_profile)
+                ).build()
+            except AppException:
+                logger.warning(
+                    "The next steps' model does not resolve; the agent offers them itself",
+                    exc_info=True,
+                )
 
         # Unsealed here and handed straight to the factory, which hands them to
         # the capability instances that declared them. They are kept out of
@@ -3281,7 +3379,7 @@ class AgentRunnerService:
             resources=resources,
             approvals=channel,
             budget=run_budget,
-            render_variables=render_variables,
+            render_variables=rendering.variables,
             runtimes=runtimes,
             delegations=delegations,
             delegate_recorders=delegate_recorders,
@@ -4281,7 +4379,7 @@ class AgentRunnerService:
                     extra={"run_id": str(parent.id), "delegation_id": str(delegation.id)},
                 )
 
-    async def _write_approvals(self, prepared: PreparedRun) -> None:
+    async def _write_approvals(self, prepared: PreparedRun, *, include_pending: bool) -> None:
         """Write the approval rows the run parked, once, off the shared session.
 
         The rows are *described* while the run runs and written here, from the
@@ -4317,11 +4415,14 @@ class AgentRunnerService:
         and this does nothing.
         """
         channel = prepared.approvals
-        named = {p.subagent_agent_id for p in channel.requested if p.subagent_agent_id is not None}
+        # A workspace failure can turn a parked run into a terminal failure.
+        # Keep standing-consent audit records, but never enqueue an impossible decision.
+        requested = [p for p in channel.requested if include_pending or p.standing]
+        named = {p.subagent_agent_id for p in requested if p.subagent_agent_id is not None}
         present = await agent_repo.existing_ids_locked(
             self.db, named, organization_id=channel.organization_id
         )
-        for parked in channel.requested:
+        for parked in requested:
             await self.approvals.request(
                 approval_id=parked.approval_id,
                 organization_id=channel.organization_id,
@@ -4455,20 +4556,33 @@ class AgentRunnerService:
 
         # Before the run row is written, so a workspace flush that fails cannot
         # leave the run un-finished, and after the run has certainly stopped
-        # using it. `close` never raises; it logs.
+        # using it. `close` reports a typed failure without replacing accounting.
         # A parked run keeps its spills: the history it resumes from names them -
         # parked on an approval or on a question to the person alike.
-        await self.workspaces.close(
+        workspace_result = await self.workspaces.close(
             prepared.workspace,
             keep_spills=status in (RunStatus.AWAITING_APPROVAL, RunStatus.AWAITING_ANSWER),
         )
+
+        if isinstance(workspace_result, WorkspaceFlushFailure):
+            error = "; ".join(part for part in (error, workspace_result.error.message) if part)
+            if status in (
+                RunStatus.COMPLETED,
+                RunStatus.AWAITING_APPROVAL,
+                RunStatus.AWAITING_ANSWER,
+            ):
+                status = RunStatus.FAILED
+                paused_state = None
 
         # The approval rows the run parked, written here rather than while it ran:
         # parking on the channel is deferred off the shared session so two gated
         # calls in one model step cannot race two inserts (agenticos#169), and this
         # is where the deferral is paid back. Before the parent's terminal write,
         # so the rows the `paused_state` names exist by the time it is stored.
-        await self._write_approvals(prepared)
+        await self._write_approvals(
+            prepared,
+            include_pending=status in (RunStatus.AWAITING_APPROVAL, RunStatus.AWAITING_ANSWER),
+        )
 
         parked = (
             None
@@ -4629,6 +4743,7 @@ class AgentRunnerService:
                     for specialist in prepared.stash.registered.get(None, [])
                 ],
                 "plan": plan,
+                "generated_files": sorted(prepared.built.deps.generated_files),
             }
         )
 
@@ -4747,7 +4862,9 @@ class AgentRunnerService:
             # A chat user watching `WEB` already sees a completion or a
             # failure on screen; every other surface is exactly the "stops
             # silently" gap this module's own docstring names.
-            if status is RunStatus.COMPLETED:
+            # A routine's own finish is told by the routine, with its name and the
+            # start of its answer, which this point does not have (#2301).
+            if status is RunStatus.COMPLETED and RunSurface(run.surface) is not RunSurface.SCHEDULE:
                 await notifications.run_completed(run, agent=agent)
             elif status in (RunStatus.FAILED, RunStatus.LOOP_STOPPED):
                 # A run stopped for looping produced nothing either, and says why.
@@ -4781,6 +4898,7 @@ class AgentRunnerService:
         steering: SteeringInbox | None = None,
         aside: bool = False,
         reports_failure: bool = False,
+        draft: bool = False,
     ) -> tuple[str, AgentRun]:
         """Run an agent to completion and return its answer.
 
@@ -4821,6 +4939,9 @@ class AgentRunnerService:
         `steering` is the inbox of a surface whose person may add to the task
         while it runs, and `aside` answers a question on the side of one (#2087).
 
+        `draft` runs the unpublished draft as a test, as `prepare` documents - the
+        HTTP API's way of trying an agent before it is published (#2301).
+
         `reports_failure` is for the HTTP API: a run that fails once started raises
         :class:`RunFailedError` naming it - :class:`ModelCallFailedError` when the
         model provider was what failed - instead of the bare exception, so the
@@ -4844,6 +4965,7 @@ class AgentRunnerService:
             environment_id=environment_id,
             on_compaction=on_compaction,
             aside=aside,
+            draft=draft,
         )
         prepared.built.deps.steering = steering
         if steering is not None:
@@ -4881,9 +5003,10 @@ class AgentRunnerService:
                 stream=stream,
             )
         except Exception as exc:
-            # A refusal of ours already says what it means; only a failure the
-            # run recorded as one is renamed.
-            if not reports_failure or isinstance(exc, AppException):
+            # Failed SQL can expire the row and leave the transaction unusable.
+            # Preserve the database error (including pool exhaustion's 503)
+            # without loading attributes from that failed transaction.
+            if not reports_failure or isinstance(exc, (AppException, SQLAlchemyError)):
                 raise
             raise failed_run_error(prepared.run, exc) from exc
         if outbound is not None:
@@ -5101,6 +5224,9 @@ class AgentRunnerService:
             plan_items=state.plan,
         )
         prepared.built.ledger.book(_spend_already_booked(run))
+        # What the run made before parking is still its own: the starting image a
+        # parked `generate_video` names was drawn earlier in this same run.
+        prepared.built.deps.generated_files.update(state.generated_files)
 
         # Out of the queue once the build has succeeded, and before anything is
         # replayed. Two different things keep two different resumes out, which is
@@ -5163,6 +5289,153 @@ class AgentRunnerService:
                 ),
                 details={"run_id": str(run.id), "status": run.status},
             ) from exc
+
+    async def can_stop_parked(self, ctx: AuthContext, run_id: UUID) -> bool:
+        """Whether this session may stop a parked run, without exposing its data."""
+        if ctx.api_key_id is not None:
+            return False
+        run = await agent_run_repo.get_run(self.db, run_id, organization_id=ctx.organization_id)
+        return (
+            run is not None
+            and run.status in (RunStatus.AWAITING_ANSWER.value, RunStatus.AWAITING_APPROVAL.value)
+            and (
+                run.user_id == ctx.user_id
+                or (
+                    run.status == RunStatus.AWAITING_APPROVAL.value
+                    and ctx.has(Perm.APPROVALS_DECIDE)
+                )
+            )
+        )
+
+    async def cancel_parked(self, ctx: AuthContext, run_id: UUID) -> str | None:
+        """Stop a parked run without executing its continuation or losing its spend.
+
+        The person who started it may stop it. An approval decider may also stop
+        a run waiting on approval. Keys cannot use this console operation.
+        The same row lock as resume serializes stopping against a continuation;
+        a second stop is idempotent, while a run already resumed is refused.
+        """
+        if ctx.api_key_id is not None:
+            raise AuthorizationError(
+                message="Stop this run from a signed-in session", details={"run_id": run_id}
+            )
+        run = await agent_run_repo.claim_parked_run(
+            self.db, run_id, organization_id=ctx.organization_id
+        )
+        if run is None:
+            raise NotFoundError(message="Run not found", details={"run_id": run_id})
+        decider = ctx.has(Perm.APPROVALS_DECIDE) and run.status in (
+            RunStatus.AWAITING_APPROVAL.value,
+            RunStatus.CANCELLED.value,
+        )
+        if run.user_id != ctx.user_id and not decider:
+            raise AuthorizationError(
+                message="Only the person who started this run may stop it",
+                details={"run_id": run_id},
+            )
+        if run.status == RunStatus.CANCELLED.value:
+            return None
+        if run.status not in (RunStatus.AWAITING_ANSWER.value, RunStatus.AWAITING_APPROVAL.value):
+            raise BadRequestError(
+                message="This run is not waiting for a response",
+                details={"run_id": run_id, "status": run.status},
+            )
+        previous_status = run.status
+        state = (
+            PausedRunState.model_validate(run.paused_state)
+            if run.paused_state is not None
+            else None
+        )
+        at = datetime.now(UTC)
+        frames = [] if state is None else list(state.delegations)
+        for frame in frames:
+            frames.extend(frame.delegations)
+        calls = [] if state is None else [*state.questions, *state.tool_call_ids.values()]
+        calls.extend(frame.tool_call_id for frame in frames)
+        await self._cancel_delegations(run, frames, at=at)
+        if state is not None and state.plan and run.conversation_id is not None:
+            await ConversationService(self.db).keep_plan(run.conversation_id, put_down(state.plan))
+        await self.transcript.record(
+            run,
+            prompt=None,
+            answer="",
+            settled=dict.fromkeys(calls, STOPPED_TOOL_RESULT),
+        )
+        await agent_run_repo.expire_pending_approvals(self.db, run_id=run.id, decided_at=at)
+        await agent_run_repo.finish_run(
+            self.db,
+            run=run,
+            status=RunStatus.CANCELLED.value,
+            input_tokens=run.input_tokens,
+            output_tokens=run.output_tokens,
+            cost_usd=run.cost_usd,
+            cost_is_partial=run.cost_is_partial,
+            ended_at=at,
+            error="Stopped by user",
+            paused_state=None,
+        )
+        await record_audit(
+            self.db,
+            actor_user_id=ctx.subject_id,
+            organization_id=ctx.organization_id,
+            action="run.cancelled",
+            target_type="agent_run",
+            target_id=str(run.id),
+            details={"previous_status": previous_status},
+        )
+        return STOPPED_TOOL_RESULT
+
+    async def _cancel_delegations(
+        self, run: AgentRun, frames: Sequence[DelegationFrame], *, at: datetime
+    ) -> None:
+        """Attribute the spend already incurred by suspended published delegates.
+
+        Inline specialists bill to their published ancestor. Deleted delegates
+        retain their cost on the parent, as in the ordinary terminal write.
+        No model is built: provider attribution was not kept in a parked frame.
+        """
+        named = {frame.agent_id for frame in frames if frame.agent_id is not None}
+        if not named:
+            return
+        present = await agent_repo.existing_ids_locked(
+            self.db, named, organization_id=run.organization_id
+        )
+        for frame in frames:
+            if (
+                frame.agent_id is None
+                or frame.agent_id not in present
+                or frame.agent_version_id is None
+            ):
+                continue
+            legacy = "billed_cost_usd" not in frame.model_fields_set
+            await agent_run_repo.record_delegated_run(
+                self.db,
+                run_id=uuid4(),
+                organization_id=run.organization_id,
+                agent_id=frame.agent_id,
+                agent_version_id=frame.agent_version_id,
+                parent_run_id=run.id,
+                subagent_task_id=frame.task_id,
+                user_id=run.user_id,
+                initiated_by_publisher_fallback=run.initiated_by_publisher_fallback,
+                channel_identity_id=run.channel_identity_id,
+                conversation_id=run.conversation_id,
+                exposure_id=run.exposure_id,
+                surface=run.surface,
+                model_label=None,
+                provider=None,
+                secret_id=None,
+                status=RunStatus.CANCELLED.value,
+                input_tokens=frame.input_tokens if legacy else frame.billed_input_tokens,
+                output_tokens=frame.output_tokens if legacy else frame.billed_output_tokens,
+                cache_read_tokens=frame.billed_cache_read_tokens,
+                cache_write_tokens=frame.billed_cache_write_tokens,
+                cost_usd=frame.cost_usd if legacy else frame.billed_cost_usd,
+                cost_is_partial=frame.cost_is_partial if legacy else frame.billed_cost_is_partial,
+                started_at=frame.started_at or at,
+                ended_at=at,
+                error="Stopped by user",
+            )
 
     async def answer(
         self, ctx: AuthContext, run_id: UUID, responses: Mapping[str, list[Any]]
@@ -5471,13 +5744,16 @@ class AgentRunnerService:
             prepared.run, "created" if deferred_tool_results is None else "updated"
         )
         try:
-            result = await self._answer(
-                prepared,
-                user_prompt=user_prompt,
-                message_history=message_history,
-                deferred_tool_results=deferred_tool_results,
-                stream=stream,
-            )
+            # Stamped alive while the model works, so a process dying under it
+            # is noticed in minutes (`app.services.run_heartbeat`).
+            async with run_heartbeat(prepared.run.id):
+                result = await self._answer(
+                    prepared,
+                    user_prompt=user_prompt,
+                    message_history=message_history,
+                    deferred_tool_results=deferred_tool_results,
+                    stream=stream,
+                )
             # `new_messages`, not `all_messages`: a resumed run is handed
             # everything up to the park as history, and the wider list would
             # write the first attempt's calls again under the same run.
@@ -5491,7 +5767,7 @@ class AgentRunnerService:
                     ModelMessagesTypeAdapter.dump_python(result.all_messages(), mode="json"),
                 )
             new_messages = result.new_messages()
-            called = tool_calls_in(new_messages)
+            called = [*tool_calls_in(new_messages), *_written_next_steps(prepared.built.deps)]
             # And what the *inherited* calls returned. On a resume the approved
             # call was made by the previous execution, so only its return is new -
             # `tool_calls_in` has nothing to hang it on and drops it, which left
@@ -5559,6 +5835,9 @@ class AgentRunnerService:
                     paused_state=paused,
                     budget_scope=budget_scope,
                 )
+                if prepared.run.status == RunStatus.FAILED.value:
+                    status = RunStatus.FAILED
+                    paused = None
                 # So a run that failed, parked or was stopped still says what was
                 # asked and what it managed to do.
                 await self.transcript.record(

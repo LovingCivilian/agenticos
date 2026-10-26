@@ -450,7 +450,7 @@ class TestWhereAnAttachmentLands:
         # The same defect in the other direction: an image the agent made was
         # written outside the workspace, so it was also absent from the snapshot
         # a channel diffs to decide what to post back.
-        from app.agents.capabilities.image_generation._toolset import WORKSPACE_OUTPUT_DIR
+        from app.agents.capabilities._generated import WORKSPACE_OUTPUT_DIR
 
         assert not WORKSPACE_OUTPUT_DIR.startswith("/")
 
@@ -814,7 +814,7 @@ class TestLoadingTheRows:
         caller = uuid4()
         service = SimpleNamespace(list_attached_files=AsyncMock(return_value=["row"]))
         monkeypatch.setattr(
-            "app.api.deps.get_conversation_service", lambda db: service, raising=True
+            "app.services.conversation.ConversationService", lambda db: service, raising=True
         )
 
         assert await module.load_attached_files(object(), [uuid4()], user_id=caller) == ["row"]
@@ -828,7 +828,7 @@ class TestLoadingTheRows:
         caller = uuid4()
         service = SimpleNamespace(list_turn_attachments=AsyncMock(return_value=["row"]))
         monkeypatch.setattr(
-            "app.api.deps.get_conversation_service", lambda db: service, raising=True
+            "app.services.conversation.ConversationService", lambda db: service, raising=True
         )
 
         assert await module.load_turn_attachments(object(), message_id, ["f1"], user_id=caller) == [

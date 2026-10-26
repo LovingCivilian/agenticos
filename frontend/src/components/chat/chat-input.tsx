@@ -130,7 +130,10 @@ interface ChatInputProps {
   hints?: boolean;
   disabled?: boolean;
   isProcessing?: boolean;
-  /** When set, a stop control replaces the send button while processing. */
+  /** A live or parked run can be stopped even while the composer is disabled. */
+  canStop?: boolean;
+  stopDisabled?: boolean;
+  /** When set, a stop control replaces the send button for a stoppable run. */
   onStop?: () => void;
   /** Local actions for slash commands. Wire from <ChatContainer>. */
   slashContext?: SlashCommandContext;
@@ -167,6 +170,16 @@ interface ChatInputProps {
    */
   actionsSlot?: ReactNode;
   /**
+   * Drawn in Send's place while there is nothing to send - the call button, so
+   * an empty box offers a call and a written one sends it (#2301).
+   */
+  idleSlot?: ReactNode;
+  /**
+   * The socket is down: the box says it is reconnecting where it would ask for a
+   * message - the one place a person looks when they cannot send (#2301).
+   */
+  offline?: boolean;
+  /**
    * The selected agent's dictation engine and, for `server`, the recording.
    * Absent, the microphone is the browser's own speech recognition.
    */
@@ -183,6 +196,8 @@ interface ChatInputProps {
   incoming?: IncomingFiles | null;
   /** Called as the person types, so a shared chat can say they are. */
   onTyping?: () => void;
+  /** Whether the box holds words of the person's own, as it changes. */
+  onDraftChange?: (drafting: boolean) => void;
   /**
    * Projects `@` offers beside what the agent reaches, before the first message;
    * picking one starts the chat in it rather than mentioning it.
@@ -208,6 +223,8 @@ export function ChatInput({
   onSend,
   disabled,
   isProcessing,
+  canStop = isProcessing,
+  stopDisabled = false,
   onStop,
   slashContext,
   commands,
@@ -216,6 +233,8 @@ export function ChatInput({
   controlsSlot,
   onProject,
   actionsSlot,
+  idleSlot,
+  offline = false,
   dictation,
   onListeningChange,
   incoming = null,
@@ -223,6 +242,7 @@ export function ChatInput({
   mentionsFromDraft = false,
   hints = false,
   onTyping,
+  onDraftChange,
   projects,
   onPickProject,
 }: ChatInputProps) {
@@ -235,6 +255,8 @@ export function ChatInput({
   const tDictation = useTranslations("chat.dictation");
   const { chatMaxUploadSizeMb } = usePublicConfig();
   const [message, setMessage] = useState("");
+  const drafting = message.trim().length > 0;
+  useEffect(() => onDraftChange?.(drafting), [drafting, onDraftChange]);
   const [attachedFiles, setAttachedFiles] = useState<Attachment[]>([]);
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [isListening, setIsListening] = useState(false);
@@ -768,7 +790,7 @@ export function ChatInput({
         onChange={typed}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        placeholder={t("placeholder")}
+        placeholder={offline ? t("reconnecting") : t("placeholder")}
         idle={
           hints && !disabled ? (
             <ComposerHints
@@ -842,17 +864,20 @@ export function ChatInput({
             )}
           </Button>
 
-          {isProcessing && onStop ? (
+          {canStop && onStop ? (
             <Button
               type="button"
               size="icon"
               onClick={onStop}
+              disabled={stopDisabled}
               className="h-9 w-9 shrink-0 rounded-lg"
               title={t("stopGenerating")}
             >
               <span className="h-3 w-3 rounded-[3px] bg-current" aria-hidden="true" />
               <span className="sr-only">{t("stopGenerating")}</span>
             </Button>
+          ) : idleSlot && !isProcessing && !message.trim() && attachedFiles.length === 0 ? (
+            idleSlot
           ) : (
             <Button
               type="submit"

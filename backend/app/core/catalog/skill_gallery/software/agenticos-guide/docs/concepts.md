@@ -67,13 +67,19 @@ The spec keeps two rules, and they are what make it useful.
 
 **A frozen spec.**
 
-Publishing copies the draft into a version and points the agent at it. Runs record
-which version executed.
+Publishing copies the draft into a version. Environments decide which version
+serves each surface, and runs record which version executed.
 
 This is why *what did this agent do last Tuesday* stays answerable after a dozen
 edits. It is also why a rollback publishes a **new** version copied from the old
 one rather than deleting history — the timeline shows that a rollback happened,
 instead of pretending the bad version never existed.
+
+Draft saves, publications, rollbacks and environment changes are serialized for
+one agent. A save that waits behind a publication remains the draft afterwards;
+it is not overwritten by the publication. Concurrent publications get distinct
+version numbers, and promoting the default environment keeps the agent's serving
+version aligned with it. New runs can still start while a publication validates.
 
 ### Environments
 
@@ -188,9 +194,9 @@ matters in my inbox* the default cannot do — on these terms:
   prompt carries a mail or a webhook body nobody vetted, and a note written from
   it would be read by every later chat as the creator's own.
 - **Past conversations stay closed** either way.
-- **Somebody else's edit turns it off.** Changing the message, the environment or
-  the filter of a trigger you did not create switches it off, so nobody rewrites
-  what runs as you. An administrator acting as you through impersonation, or a
+- **Somebody else's edit turns it off.** Changing the message, the environment,
+  the filter or the Teams channel of a trigger you did not create switches it
+  off, so nobody rewrites what runs as you or sends its answer somewhere else. An administrator acting as you through impersonation, or a
   script holding your API key, cannot turn it on.
 - **So does a new version you did not publish yourself.** A publish, a
   promotion or a rollback by anybody else turns it off - and so does one made
@@ -219,7 +225,8 @@ It is stamped the `schedule` surface, so *how is this agent used* can tell an
 unattended run from a person's. Each fire is its own run in Activity, and its
 answers accumulate in one run-log conversation the trigger opens once — eagerly,
 the moment the trigger is created, so it is a clickable item before it has ever
-fired.
+fired. A trigger can also post each answer to a Teams channel or group chat its
+organization's bot is in ([Microsoft Teams](channels.md#microsoft-teams)).
 
 ### Two ways to fire
 
