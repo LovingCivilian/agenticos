@@ -427,6 +427,176 @@ describe("the chat container - following the transcript", () => {
     expect(scroller.style.paddingBottom).toBe("148px");
     expect(scroller.scrollTop).toBe(200);
   });
+
+  /** The transcript's scroller, with a screen of height, on whatever the chat shows. */
+  function scrollerOnScreen(): HTMLElement {
+    const dock = screen.getByRole("textbox").closest(".absolute") as HTMLElement;
+    const scroller = dock.previousElementSibling as HTMLElement;
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 500 });
+    return scroller;
+  }
+
+  /** The transcript gets taller, as an answer streaming in does. */
+  function growTranscript(
+    observers: ReturnType<typeof observeSizes>,
+    scroller: HTMLElement,
+    height: number,
+  ): void {
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: height });
+    act(() => {
+      for (const observer of observers) {
+        if (observer.targets.includes(scroller.firstElementChild as Element)) observer.grew();
+      }
+    });
+  }
+
+  /** The reader writes a question and sends it. */
+  async function ask(question: string): Promise<void> {
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, question);
+    fireEvent.submit(box.closest("form")!);
+  }
+
+  it("follows an answer to a question sent after a scroll up on the welcome", async () => {
+    const observers = observeSizes();
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    await ask("Send the invoice");
+    // An empty transcript holds the follow too: wait for the question to be on it.
+    await screen.findByText("Send the invoice");
+    scroller.scrollTop = 0;
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(2600);
+  });
+
+  it("follows the conversation opened after a scroll up in the one left", async () => {
+    const observers = observeSizes();
+    useConversationStore.getState().setCurrentConversationId("c-a");
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    act(() =>
+      useChatStore.getState().addMessage({
+        id: "m-a",
+        role: "user",
+        content: "In the first thread",
+        timestamp: new Date(),
+      }),
+    );
+    await screen.findByText("In the first thread");
+    const scroller = scrollerOnScreen();
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    act(() => useConversationStore.getState().setCurrentConversationId("c-b"));
+    act(() =>
+      useChatStore.getState().addMessage({
+        id: "m-b",
+        role: "user",
+        content: "In the second thread",
+        timestamp: new Date(),
+      }),
+    );
+    await screen.findByText("In the second thread");
+    scroller.scrollTop = 0;
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(2600);
+  });
+
+  it("leaves a reader who scrolled up in the middle of an answer where they are", async () => {
+    const observers = observeSizes();
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    await ask("Send the invoice");
+    await screen.findByText("Send the invoice");
+    receive("model_request_start", {});
+    scroller.scrollTop = 1500;
+    fireEvent.wheel(scroller, { deltaY: -40 });
+    scroller.scrollTop = 200;
+    // The answer's own words arriving are not a turn starting.
+    receive("text_delta", { index: 0, content: "Checking the ledger" });
+    await waitFor(() =>
+      expect(JSON.stringify(useChatStore.getState().messages)).toContain("Checking the ledger"),
+    );
+
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(200);
+  });
+
+  it("follows a queued message once it goes out, not when it is queued", async () => {
+    const observers = observeSizes();
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    await ask("First question");
+    await screen.findByText("First question");
+    receive("model_request_start", {});
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    // A turn is running, so this one waits its turn instead of starting one.
+    await ask("Second question");
+    scroller.scrollTop = 200;
+    growTranscript(observers, scroller, 2600);
+    expect(scroller.scrollTop).toBe(200);
+
+    // The turn ends, and the server is ready for the next one: the queue drains.
+    receive("complete", { usage: null });
+    receive("session_ready", {});
+    await waitFor(() =>
+      expect(socket.send.mock.calls.some(([frame]) => frame.message === "Second question")).toBe(
+        true,
+      ),
+    );
+    await screen.findByText("Second question");
+    scroller.scrollTop = 0;
+    growTranscript(observers, scroller, 3200);
+
+    expect(scroller.scrollTop).toBe(3200);
+  });
+
+  it("leaves a reader who scrolled up where they are when their first answer names its conversation", async () => {
+    const observers = observeSizes();
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    await ask("Send the invoice");
+    await screen.findByText("Send the invoice");
+    receive("model_request_start", {});
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    receive("conversation_created", { conversation_id: "c-new" });
+    scroller.scrollTop = 200;
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(200);
+  });
+
+  it("leaves a reader who scrolled up where they are when a running turn is attached again", async () => {
+    // A socket that dropped mid-answer ends the turn here, and coming back attaches
+    // to it again: the turn is running once more, but the reader did not start it.
+    const observers = observeSizes();
+    useConversationStore.getState().setCurrentConversationId("c-a");
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    await ask("Send the invoice");
+    await screen.findByText("Send the invoice");
+    receive("model_request_start", {});
+    receive("text_delta", { index: 0, content: "Checking the ledger" });
+    receive("complete", { usage: null });
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    receive("turn_attached", { conversation_id: "c-a" });
+    scroller.scrollTop = 200;
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(200);
+  });
 });
 
 describe("the chat container - delegation panels across a conversation switch", () => {
