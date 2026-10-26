@@ -2,7 +2,10 @@
 
 import { Lightbulb, MessageCircleQuestion } from "lucide-react";
 import { useTranslations } from "next-intl";
+import { useCallback, useRef } from "react";
 
+import { useFollowContent } from "@/hooks/use-follow-content";
+import { useReaderScrolledUp } from "@/hooks/use-reader-scrolled-up";
 import { useLinger, useSmoothText } from "@/hooks/use-smooth-text";
 import { toolEntry } from "@/lib/tool-catalog";
 import { drawnUnderTheAnswer } from "@/lib/turn-extras";
@@ -172,6 +175,17 @@ export function ThinkingBlock({
   isStreaming: boolean;
 }) {
   const t = useTranslations("chat");
+  const visible = useSmoothText(text, isStreaming);
+  const flowing = useLinger(isStreaming || visible.length < text.length, WORD_FADE_MS);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const scrolledUpRef = useRef(false);
+  useReaderScrolledUp(scrollerRef, scrolledUpRef);
+  // The box follows its newest line unless the reader scrolled up in it. Once it
+  // stops flowing the follow is held: opening a finished block, or the observer's
+  // first callback, would otherwise jump finished reasoning to its end.
+  const holdFollow = useCallback(() => !flowing || scrolledUpRef.current, [flowing]);
+  useFollowContent(scrollerRef, contentRef, holdFollow);
   return (
     <details className="group" open={open}>
       {/* A line, not a box. The reasoning is an aside on the way to an answer, and a
@@ -193,8 +207,17 @@ export function ThinkingBlock({
           and the underscores literally, in a face that says "this is output"
           about the one part of a turn that is prose. Still the muted, smaller,
           scrollable aside it was; only the text is read properly now. */}
-      <div className="text-muted-foreground border-foreground/10 mt-2 max-h-72 overflow-y-auto border-l pl-3.5 text-[13px] leading-relaxed">
-        <MarkdownContent content={text} />
+      <div
+        ref={scrollerRef}
+        className="text-muted-foreground border-foreground/10 mt-2 max-h-72 overflow-y-auto border-l pl-3.5 text-[13px] leading-relaxed"
+      >
+        {/* Clipped while it streams: a new block rises from 3px below its place,
+            and browsers count that offset as scroll height, so the follow pinned
+            the box 3px too deep and it slid back as the block rose. The transcript
+            never bobbed because its padding absorbs the offset; this box has none. */}
+        <div ref={contentRef} className={cn(isStreaming && "stream-in overflow-y-clip")}>
+          <MarkdownContent content={visible} streaming={flowing} />
+        </div>
       </div>
     </details>
   );

@@ -19,6 +19,14 @@ Two things are versioned separately from this file and worth knowing about:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The thinking block streams the way the answer does.** Each chunk of
+  reasoning appeared all at once, and once the reasoning was taller than its
+  box, new text arrived below the visible area and nothing scrolled. Now words
+  fade in at a steady pace, new paragraphs rise into place, and the box stays on
+  its newest line unless the reader scrolls up in it.
+
 ## [1.18.0] - 2026-10-26
 
 ### Fixed
