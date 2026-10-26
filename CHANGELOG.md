@@ -19,6 +19,14 @@ Two things are versioned separately from this file and worth knowing about:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The chat follows a long answer again after a scroll up.** One scroll up,
+  even on a new chat's empty welcome, stopped the transcript following every
+  later answer until the scrollbar was dragged back to the bottom. Following now
+  comes back when a turn of yours starts, including a queued message going out,
+  and when you open or start a conversation.
+
 ## [1.13.0] - 2026-10-22
 
 ### Added

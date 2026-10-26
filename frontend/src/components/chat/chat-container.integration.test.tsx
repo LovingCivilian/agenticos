@@ -533,6 +533,28 @@ describe("the chat container - following the transcript", () => {
 
     expect(scroller.scrollTop).toBe(200);
   });
+
+  it("leaves a reader who scrolled up where they are when a running turn is attached again", async () => {
+    // A socket that dropped mid-answer ends the turn here, and coming back attaches
+    // to it again: the turn is running once more, but the reader did not start it.
+    const observers = observeSizes();
+    useConversationStore.getState().setCurrentConversationId("c-a");
+    mount();
+    await screen.findByRole("button", { name: "Voice input" });
+    const scroller = scrollerOnScreen();
+    await ask("Send the invoice");
+    await screen.findByText("Send the invoice");
+    receive("model_request_start", {});
+    receive("text_delta", { index: 0, content: "Checking the ledger" });
+    receive("complete", { usage: null });
+    fireEvent.wheel(scroller, { deltaY: -40 });
+
+    receive("turn_attached", { conversation_id: "c-a" });
+    scroller.scrollTop = 200;
+    growTranscript(observers, scroller, 2600);
+
+    expect(scroller.scrollTop).toBe(200);
+  });
 });
 
 describe("the chat container - delegation panels across a conversation switch", () => {

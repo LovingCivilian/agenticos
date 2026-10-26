@@ -503,6 +503,9 @@ export function ChatContainer({
       // typed in the previous conversation's context, sending them into a
       // different conversation would surprise the user.
       clearQueued();
+      // Another thread, or a new one, is read from its end: a scroll up was about
+      // the one left. Not when a new chat is named mid-answer - that reader stays.
+      userScrolledUpRef.current = false;
     }
 
     prevConversationIdRef.current = currId;
@@ -531,6 +534,19 @@ export function ChatContainer({
 
   // Whether the reader has moved up to read, so the transcript stops following.
   useReaderScrolledUp(scrollContainerRef, userScrolledUpRef);
+
+  // A turn of the reader's own starting - a send, a regenerate, a queued message
+  // going out - is followed from its first line: a scroll up before it, even on
+  // the welcome where nothing scrolls, would leave its answer growing below the
+  // fold. Queueing one while a turn runs is not a start, so it moves nobody. Such
+  // a turn opens on the reader's question; one attached again after a dropped
+  // socket opens on the answer under way, and its reader stays where they were.
+  const wasProcessing = useRef(isProcessing);
+  useEffect(() => {
+    const started = isProcessing && !wasProcessing.current;
+    wasProcessing.current = isProcessing;
+    if (started && messages.at(-1)?.role === "user") userScrolledUpRef.current = false;
+  }, [isProcessing, messages]);
 
   // Auto-scroll on every messages update unless user has scrolled up. The
   // transcript scrolls itself rather than calling `scrollIntoView`, which also
