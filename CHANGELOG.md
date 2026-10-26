@@ -19,6 +19,17 @@ Two things are versioned separately from this file and worth knowing about:
 
 ## [Unreleased]
 
+### Fixed
+
+- **A small scroll up while an answer streams stays where the reader put it.**
+  A turn of the mouse wheel, or a short drag of the scrollbar, that stayed near
+  the bottom of the chat was undone by the answer's next line, which pulled the
+  view back down. Only a large scroll got away. Now any scroll up by wheel or
+  scrollbar leaves the view where the reader moved it, and scrolling back to the
+  bottom follows the answer again. The scrollbar drag is verified in Chromium,
+  not yet in Firefox; a browser that does not report the press on the scrollbar
+  keeps the old rule for it.
+
 ## [1.13.0] - 2026-10-22
 
 ### Added
