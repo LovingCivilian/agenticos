@@ -27,6 +27,10 @@ Two things are versioned separately from this file and worth knowing about:
   checks out that release's tag as well; `scripts/deploy.sh` already does. An
   install without a checkout, from `scripts/quickstart.sh`, downloads that
   release's `docker-compose.yml` beside the pin.
+- An API key added from the coding agent's card for Codex is stored as an
+  OpenAI key, so the Builder no longer offers it to Claude Code after a harness
+  switch, where it published and then failed at run time (#2485). Keys added for
+  Claude Code, or behind a gateway, are still stored as custom.
 
 ## [1.25.0] - 2026-10-27
 
