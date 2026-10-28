@@ -1,5 +1,5 @@
 ---
-source_sha: "522aee0f8ac1"
+source_sha: "7ae398d56c49"
 ---
 
 # Konfiguracja źródeł synchronizacji { #configure-sync-sources }
@@ -705,7 +705,7 @@ Każda synchronizacja tworzy wpis `SyncLog` z następującymi polami:
 | `skipped` | Pominięte (już obecne lub bez zmian) |
 | `failed` | Nieudane przetworzenie, łącznie ze stronami lub plikami, których lista nie zdołała odczytać, oraz dokumentami, których nie udało się usunąć |
 | `removed` | Usunięte, bo źródło już ich nie wypisuje (zobacz [co usuwa synchronizacja](#what-a-sync-removes)) |
-| `error_message` | Co poszło nie tak albo dlaczego nic nie usunięto. Przebieg może mieć status `done` i mimo to komunikat, na przykład gdy crawl zatrzymał się na limicie stron albo gdy pliki zmieniły się w trakcie przebiegu i następny przebieg je zsynchronizuje. To, czy przebieg się nie powiódł, mówi `status` |
+| `error_message` | Co poszło nie tak albo dlaczego nic nie usunięto. Przebieg może mieć status `done` i mimo to komunikat, na przykład gdy crawl zatrzymał się na limicie stron albo gdy pliki zmieniły się lub zostały usunięte w trakcie przebiegu i czekają na następny przebieg. To, czy przebieg się nie powiódł, mówi `status` |
 | `started_at` | Kiedy synchronizacja się zaczęła |
 | `completed_at` | Kiedy synchronizacja się skończyła |
 

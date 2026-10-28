@@ -1,5 +1,5 @@
 ---
-source_sha: "522aee0f8ac1"
+source_sha: "7ae398d56c49"
 ---
 
 # Sync-Quellen einrichten { #configure-sync-sources }
@@ -717,7 +717,7 @@ Jeder Sync erzeugt einen `SyncLog`-Eintrag mit den folgenden Feldern:
 | `skipped` | Übersprungen (bereits vorhanden oder unverändert) |
 | `failed` | Aufnahme fehlgeschlagen, einschließlich Seiten oder Dateien, die die Auflistung nicht lesen konnte, und Dokumenten, die nicht entfernt werden konnten |
 | `removed` | Entfernt, weil die Quelle sie nicht mehr auflistet (siehe [was ein Sync entfernt](#what-a-sync-removes)) |
-| `error_message` | Was schiefging oder warum nichts entfernt wurde. Ein Lauf kann `done` sein und trotzdem eine Meldung tragen, etwa wenn ein Crawl an seinem Seitenlimit angehalten hat oder wenn sich Dateien während des Laufs geändert haben und der nächste Lauf sie synchronisiert. Ob der Lauf fehlgeschlagen ist, steht in `status` |
+| `error_message` | Was schiefging oder warum nichts entfernt wurde. Ein Lauf kann `done` sein und trotzdem eine Meldung tragen, etwa wenn ein Crawl an seinem Seitenlimit angehalten hat oder wenn sich Dateien während des Laufs geändert haben oder gelöscht wurden und dem nächsten Lauf überlassen werden. Ob der Lauf fehlgeschlagen ist, steht in `status` |
 | `started_at` | Wann der Sync begann |
 | `completed_at` | Wann der Sync endete |
 

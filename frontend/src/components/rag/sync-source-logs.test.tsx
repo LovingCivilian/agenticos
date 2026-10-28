@@ -86,7 +86,8 @@ describe("SyncSourceLogs message", () => {
   });
 
   it("draws a done run's note as muted text", async () => {
-    const note = "2 files changed while this sync ran and will be synced by the next one.";
+    const note =
+      "2 files changed or were deleted while this sync ran, so they were left for the next sync.";
     const message = await shown(log({ skipped: 2, error_message: note }), note);
 
     expect(message).toHaveClass("text-muted-foreground");

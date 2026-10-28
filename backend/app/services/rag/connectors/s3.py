@@ -230,7 +230,8 @@ class S3Connector(ObjectStoreConnector):
         Raises:
             ChangedSinceListing: the object changed, or went, during the transfer.
             ExternalServiceError: the store refused a read pinned to its own
-                current `ETag`, or sent fewer bytes than it says the object holds.
+                current `ETag`, sent fewer bytes than it says the object holds,
+                or answered 404 for a key it still lists.
         """
         # Imported here for the reason `_get_s3_client` gives (#2225).
         from boto3.s3.transfer import TransferConfig
@@ -312,7 +313,8 @@ class S3Connector(ObjectStoreConnector):
         returned is the bytes' own.
 
         Raises:
-            ChangedSinceListing: the object was deleted after it was listed.
+            ChangedSinceListing: the object was deleted after it was listed,
+                and a listing no longer names it.
         """
         from botocore.exceptions import ClientError
         from s3transfer.utils import S3_RETRYABLE_DOWNLOAD_ERRORS
@@ -326,9 +328,12 @@ class S3Connector(ObjectStoreConnector):
                 return response.get("ETag") or None
             except ClientError as exc:
                 # Listed, and gone by the time it was read: the next listing
-                # leaves it out and the sync removes its document. Not
-                # `NoSuchBucket`, which is the source's own configuration.
-                if exc.response.get("Error", {}).get("Code") != "NoSuchKey":
+                # leaves it out and the sync removes its document. By status,
+                # as the managed transfer decides, not by code: a 404 with no
+                # body carries the code "404". A key the store still lists is
+                # a read it cannot serve, and a failure.
+                status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if status != 404 or not _gone(client, container, key):
                     raise
                 raise ChangedSinceListing(
                     f"{Path(key).name} was deleted before it was downloaded."
@@ -345,9 +350,10 @@ class S3Connector(ObjectStoreConnector):
     ) -> ChangedSinceListing | ExternalServiceError:
         """Why a pinned transfer did not deliver its version, asked of the store.
 
-        Moved when the object's `ETag` is no longer the pinned one, or the
-        object is gone. Otherwise the store failed a read of a version it still
-        holds, which is a failure for the sync to count and show, not a change.
+        Moved when the object's `ETag` is no longer the pinned one, or when it
+        is gone and a listing no longer names it. Otherwise the store failed a
+        read of a version it still holds, which is a failure for the sync to
+        count and show, not a change.
         """
         from botocore.exceptions import ClientError
 
@@ -357,7 +363,26 @@ class S3Connector(ObjectStoreConnector):
         except ClientError as exc:
             if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
                 raise
-            return ChangedSinceListing(f"{name} was deleted while it was downloaded.")
+            if _gone(client, container, key):
+                return ChangedSinceListing(f"{name} was deleted while it was downloaded.")
+            return ExternalServiceError(
+                message=f"The store lists {name}, but answers that it does not exist.",
+                details={"etag": pinned},
+            )
         if pinned is not None and current != pinned:
             return ChangedSinceListing(f"{name} changed while it was downloaded.")
         return ExternalServiceError(message=refusal, details={"etag": pinned})
+
+
+def _gone(client: BaseClient, container: str, key: str) -> bool:
+    """Whether a listing no longer names `key`: the evidence that a 404 is a deletion.
+
+    A 404 alone is not that evidence. A store or a proxy can answer 404 for a
+    key it lists - a path rewritten on its way in, a key the listing decodes
+    one way and a read another - and taken for a deletion, that file would be
+    skipped on every run while the sync reported success. The key sorts first
+    among the keys it is a prefix of, so a listing of one key answers. A bucket
+    that is gone raises here: that is the source's configuration, not a change.
+    """
+    listed = client.list_objects_v2(Bucket=container, Prefix=key, MaxKeys=1)
+    return all(obj.get("Key") != key for obj in listed.get("Contents", []))

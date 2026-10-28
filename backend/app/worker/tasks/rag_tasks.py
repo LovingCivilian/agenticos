@@ -1309,10 +1309,11 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
     # Listed files a fetch found the source no longer holds - a sitemap page now
     # marked `noindex`, or gone. Not failures: removed like any unlisted file.
     withdrawn: set[str] = set()
-    # Listed files that changed while they were fetched. Not failures either:
-    # skipped, still claimed, and read by the next run, which lists their new
-    # version. Counted as a failure, a file that only moved put the source in
-    # `error` and sent a failure notice.
+    # Listed files that changed, or went, while they were fetched. Not
+    # failures either: skipped, still claimed, and settled by the next run,
+    # which lists their new version or leaves them out. Counted as a failure,
+    # a file that only moved put the source in `error` and sent a failure
+    # notice.
     changed_while_fetched = 0
     # The stored documents found at listed addresses, as `(source_path,
     # vector_document_id)`: this source lists them, so it claims them, whichever
@@ -1562,8 +1563,8 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
 
             if changed_while_fetched:
                 notes.append(
-                    f"{changed_while_fetched} files changed while this sync ran and will be "
-                    "synced by the next one."
+                    f"{changed_while_fetched} files changed or were deleted while this sync "
+                    "ran, so they were left for the next sync."
                 )
             if kept:
                 from app.services.rag_document import RAGDocumentService

@@ -1,5 +1,5 @@
 ---
-source_sha: "220fc56aa1cc"
+source_sha: "81e32d2f385c"
 ---
 
 # Dodaj konektor synchronizacji { #add-a-sync-connector }
@@ -442,7 +442,7 @@ z których warto kopiować.
 ## Wskazówki { #tips }
 
 - Ustaw `RemoteFile.source_path` na unikalny URI (np. `notion://page_id`) — jest on używany do deduplikacji między synchronizacjami i to jego porównuje usuwanie: dokument, którego `source_path` kompletny listing już nie wymienia, jest usuwany
-- Wypełniaj `RemoteFile.revision` z listingu, nigdy z pobranych bajtów, bo jej celem jest pominięcie pobrania. Jeśli wartość może przeoczyć zmianę, na przykład rozmiar i czas modyfikacji, napisz o tym w docstringu konektora: `new_only` i `update_only` jej ufają, a środkiem zaradczym jest przebieg `full`. `_fetch` zwraca rewizję zapisanych bajtów albo `None`, bo synchronizacja zapisuje właśnie ją. Zgłoś `ChangedSinceListing`, jeśli plik zmienił się w trakcie pobierania. Pominięty plik nigdy nie trafia do `_fetch`. Jeśli `_fetch` odrzuca plik z powodu, który nie zmienia rewizji, na przykład reguły robots.txt, sprawdzaj ten powód także w listingu
+- Wypełniaj `RemoteFile.revision` z listingu, nigdy z pobranych bajtów, bo jej celem jest pominięcie pobrania. Jeśli wartość może przeoczyć zmianę, na przykład rozmiar i czas modyfikacji, napisz o tym w docstringu konektora: `new_only` i `update_only` jej ufają, a środkiem zaradczym jest przebieg `full`. `_fetch` zwraca rewizję zapisanych bajtów albo `None`, bo synchronizacja zapisuje właśnie ją. Zgłoś `ChangedSinceListing` tylko wtedy, gdy źródło pokazuje, że plik zmienił się albo zniknął w trakcie pobierania, na przykład nowa wersja albo listing, który nie wymienia już pliku. Nigdy nie zgłaszaj go tylko z powodu nieudanego odczytu: odczyt, który zawodzi w każdym przebiegu, byłby wtedy pomijany w każdym przebiegu. Pominięty plik nigdy nie trafia do `_fetch`. Jeśli `_fetch` odrzuca plik z powodu, który nie zmienia rewizji, na przykład reguły robots.txt, sprawdzaj ten powód także w listingu
 - Zwracaj `complete=False` z listingu, który zatrzymał się przed końcem, i nigdy nie rzucaj wyjątku z takiego, z którego możesz jeszcze częściowo skorzystać
 - Używaj `asyncio.to_thread()`, żeby opakować blokujące wywołania SDK, tak by nie blokowały pętli zdarzeń
 - Zaimplementuj `validate_config()`, żeby odrzucić konfigurację, którą kreator może jeszcze poprawić — `ConfigRefusal` nazywające `field` jest tym, co każe kreatorowi zaznaczyć to wejście, zamiast pokazywać zdanie nad czterema z nich. Metoda ta widzi konfigurację, a nie poświadczenie, więc „czy ten klucz dosięgnie usługi" to pytanie na pierwszą synchronizację, a nie na tę metodę

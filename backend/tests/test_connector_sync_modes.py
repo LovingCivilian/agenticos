@@ -731,7 +731,8 @@ class TestTheRevisionStoredIsTheOneDownloaded:
         ingest.assert_not_awaited()
         assert (answer["status"], answer["skipped"], answer["failed"]) == ("done", 1, 0)
         assert (
-            "changed while this sync ran" in syncs.complete_sync.await_args.kwargs["error_message"]
+            "changed or were deleted while this sync ran"
+            in syncs.complete_sync.await_args.kwargs["error_message"]
         )
         assert documents.claim_listed.await_args.kwargs["documents"] == {
             (SOURCE_PATH, "vector-doc-1")

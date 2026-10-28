@@ -540,33 +540,64 @@ class TestTheS3ConnectorStillListsWhatItListed:
         with pytest.raises(ExternalServiceError, match="refused a read"):
             await self._fetch_through(tmp_path, self._store_now_at('"pinned-etag-3"'), fails=error)
 
-    @pytest.mark.parametrize(
-        "error",
-        [
-            # A pinned range of a deleted object, as S3 and MinIO answer it.
+    _ABSENT = (
+        # A pinned range of a deleted object, as S3 and MinIO answer it.
+        pytest.param(
             ClientError(
                 {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
                 "GetObject",
             ),
-            # The transfer's own HEAD, when the object went before it began.
+            id="a pinned range",
+        ),
+        # The transfer's own HEAD, when the object went before it began.
+        pytest.param(
             ClientError(
                 {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
                 "HeadObject",
             ),
+            id="the transfer's HEAD",
+        ),
+        pytest.param(
             S3DownloadFailedError('Contents of stored object "legal/nda.pdf"'),
-        ],
-        ids=["a pinned range", "the transfer's HEAD", "a 412 then gone"],
+            id="a 412 then gone",
+        ),
     )
-    async def test_an_object_deleted_during_its_download_is_changed(
-        self, tmp_path: Path, error: Exception
-    ):
-        """Gone is a change the next listing settles by leaving the file out -
-        not a failure to report."""
+
+    @staticmethod
+    def _found_by_no_head(*, listed: list[str]) -> MagicMock:
+        """A client whose HEAD finds no object, and whose listing names `listed`."""
         client = MagicMock()
         client.head_object.side_effect = ClientError(
             {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject"
         )
+        client.list_objects_v2.return_value = {"Contents": [{"Key": key} for key in listed]}
+        return client
+
+    @pytest.mark.parametrize("error", _ABSENT)
+    async def test_an_object_deleted_during_its_download_is_changed(
+        self, tmp_path: Path, error: Exception
+    ):
+        """Gone is a change the next listing settles by leaving the file out -
+        not a failure to report. A key that only starts with this one is
+        another object, not this one still listed."""
+        client = self._found_by_no_head(listed=["legal/nda.pdf.v2"])
         with pytest.raises(ChangedSinceListing, match="deleted"):
+            await self._fetch_through(tmp_path, client, fails=error)
+
+        client.list_objects_v2.assert_called_once_with(
+            Bucket="acme", Prefix="legal/nda.pdf", MaxKeys=1
+        )
+
+    @pytest.mark.parametrize("error", _ABSENT)
+    async def test_a_key_the_store_still_lists_is_a_failure_not_a_skip(
+        self, tmp_path: Path, error: Exception
+    ):
+        """A 404 for a key the listing still names: a proxy that rewrites the
+        path, a key the store decodes one way to list and another to read. The
+        HEAD fails the same way and the listing does not. Read as a deletion,
+        the file would be skipped on every run while the sync reported success."""
+        client = self._found_by_no_head(listed=["legal/nda.pdf"])
+        with pytest.raises(ExternalServiceError, match=r"lists nda\.pdf"):
             await self._fetch_through(tmp_path, client, fails=error)
 
     async def test_any_other_error_of_the_transfer_is_raised_as_it_is(self, tmp_path: Path):
@@ -582,29 +613,58 @@ class TestTheS3ConnectorStillListsWhatItListed:
 
         client.head_object.assert_not_called()
 
-    @pytest.mark.parametrize(
-        ("code", "raised"),
-        [("NoSuchKey", ChangedSinceListing), ("NoSuchBucket", ClientError)],
-    )
-    async def test_a_small_object_gone_since_its_listing_is_changed(
-        self, tmp_path: Path, code: str, raised: type[Exception]
-    ):
-        """A missing object, not a missing bucket: the bucket is the source's
-        configuration, and a sync that lost it has to say so."""
+    @staticmethod
+    def _read_as_absent(code: str, *, listed: list[str]) -> MagicMock:
+        """A client whose `GetObject` answers 404 with `code`, and whose listing names `listed`."""
         client = MagicMock()
         client.get_object.side_effect = ClientError(
             {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject"
         )
-        with (
-            patch.object(S3Connector, "_get_s3_client", return_value=client),
-            pytest.raises(raised),
-        ):
-            await S3Connector().fetch_file(
+        client.list_objects_v2.return_value = {"Contents": [{"Key": key} for key in listed]}
+        return client
+
+    async def _read_whole(self, tmp_path: Path, client: MagicMock) -> FetchedFile:
+        with patch.object(S3Connector, "_get_s3_client", return_value=client):
+            return await S3Connector().fetch_file(
                 self._remote(size=3),
                 tmp_path,
                 config={"bucket": "acme"},
                 credential=self._credential(),
             )
+
+    @pytest.mark.parametrize("code", ["NoSuchKey", "404"], ids=["S3's code", "a 404 with no body"])
+    async def test_a_small_object_gone_since_its_listing_is_changed(
+        self, tmp_path: Path, code: str
+    ):
+        """Decided by the status, as the managed transfer decides it: a 404 with
+        no body reaches botocore with the code "404", and read by its code, a
+        small object deleted after its listing was a failure where a large one
+        was a skip. Then by a listing that no longer names the key."""
+        client = self._read_as_absent(code, listed=["legal/nda.pdf.v2"])
+        with pytest.raises(ChangedSinceListing, match="deleted before"):
+            await self._read_whole(tmp_path, client)
+
+        client.list_objects_v2.assert_called_once_with(
+            Bucket="acme", Prefix="legal/nda.pdf", MaxKeys=1
+        )
+
+    async def test_a_small_object_the_store_still_lists_is_a_failure(self, tmp_path: Path):
+        """The same 404, for a key the listing still names, is a read the store
+        cannot serve. It fails on every run, so a skip would hide it for good."""
+        client = self._read_as_absent("NoSuchKey", listed=["legal/nda.pdf"])
+        with pytest.raises(ClientError, match="NoSuchKey"):
+            await self._read_whole(tmp_path, client)
+
+    async def test_a_small_object_in_a_bucket_that_is_gone_is_a_failure(self, tmp_path: Path):
+        """The bucket is the source's configuration, and a sync that lost it has
+        to say so: the listing that would confirm a deletion raises too."""
+        client = self._read_as_absent("NoSuchBucket", listed=[])
+        client.list_objects_v2.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchBucket"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+            "ListObjectsV2",
+        )
+        with pytest.raises(ClientError, match="NoSuchBucket"):
+            await self._read_whole(tmp_path, client)
 
     async def test_a_412_on_the_single_get_is_raised_as_it_is(self, tmp_path: Path):
         """That read is conditional on nothing, so no change can be behind it."""

@@ -262,7 +262,8 @@ class RAGSyncLogItem(BaseSchema):
         description=(
             "Why the run failed, when its status is `error`. A run with status `done` "
             "can also have a note here, for example when a crawl stopped at its page "
-            "limit, or when files changed during the run and the next run syncs them. "
+            "limit, or when files changed or were deleted during the run and were left "
+            "for the next run. "
             "Read `status` to know if the run failed."
         ),
     )

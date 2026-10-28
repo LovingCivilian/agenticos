@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 from botocore.client import BaseClient
+from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from pydantic import SecretStr
 
@@ -381,6 +382,57 @@ async def test_an_object_deleted_after_its_listing_is_changed(
     client.delete_object(Bucket=bucket, Key=key)
 
     with pytest.raises(ChangedSinceListing, match="deleted"):
+        await S3Connector().fetch_file(
+            listed, tmp_path, config=_config(bucket, prefix), credential=_credential()
+        )
+
+
+def _reads_sent_to(
+    elsewhere: str,
+) -> Callable[[S3Connector, ConnectorConfig, StorableSecret | None], BaseClient]:
+    """`_get_s3_client`, with every `GetObject` and `HeadObject` sent for the key
+    `elsewhere` - a proxy that rewrites a read's path, played by the real store.
+    A listing is not rewritten, so it still names the key."""
+    real = S3Connector._get_s3_client
+
+    def client_for(
+        self: S3Connector, config: ConnectorConfig, credential: StorableSecret | None
+    ) -> BaseClient:
+        connector_client = real(self, config, credential)
+
+        def rewrite(params: dict[str, Any], **_: object) -> None:
+            params["Key"] = elsewhere
+
+        for operation in ("GetObject", "HeadObject"):
+            connector_client.meta.events.register(f"before-parameter-build.s3.{operation}", rewrite)
+        return connector_client
+
+    return client_for
+
+
+@pytest.mark.parametrize(
+    ("size", "refusal", "says"),
+    [(64, ClientError, "GetObject"), (LARGE, ExternalServiceError, r"lists unreadable\.bin")],
+    ids=["single-part", "multipart"],
+)
+async def test_a_key_the_store_lists_but_cannot_read_fails_the_file(
+    bucket: str, prefix: str, tmp_path: Path, size: int, refusal: type[Exception], says: str
+) -> None:
+    """A 404 on every read of a key the listing names. Taken for a deletion,
+    the file would be skipped on every run while the sync reported success.
+    The listing still names it, so it is a failure the log shows."""
+    client = _client()
+    key = f"{prefix}unreadable.bin"
+    if size > 8 * MIB:
+        _put_multipart(client, bucket, key, os.urandom(size))
+    else:
+        client.put_object(Bucket=bucket, Key=key, Body=os.urandom(size))
+    listed = (await _listed(bucket, prefix))[key]
+
+    with (
+        patch.object(S3Connector, "_get_s3_client", _reads_sent_to(f"{key}.elsewhere")),
+        pytest.raises(refusal, match=says),
+    ):
         await S3Connector().fetch_file(
             listed, tmp_path, config=_config(bucket, prefix), credential=_credential()
         )

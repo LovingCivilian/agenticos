@@ -99,15 +99,20 @@ class WithdrawnFile(Exception):
 
 
 class ChangedSinceListing(Exception):
-    """A listed file that changed while it was being fetched.
+    """A listed file that changed, or went, while it was being fetched.
 
     An object store refuses a ranged read pinned to a version the object has
     left, which is the only way a download that takes many requests can tell
     that it would otherwise write one version's start and another's end. Raised
     from `_fetch`, this tells the sync that the file is neither broken nor
     withdrawn: it is skipped, its document stays claimed, and the next listing
-    names the version it has now. `message` is a sentence this repository
-    wrote, as a listing's `problems` are.
+    names the version it has now, or leaves it out. `message` is a sentence
+    this repository wrote, as a listing's `problems` are.
+
+    Raised only on evidence the remote system gives - a version that moved, a
+    listing that no longer names the file - never on a failed read alone. A
+    read that fails the same way on every run would otherwise be skipped on
+    every run while the sync reported success.
     """
 
     def __init__(self, message: str) -> None:

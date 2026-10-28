@@ -1,5 +1,5 @@
 ---
-source_sha: "220fc56aa1cc"
+source_sha: "81e32d2f385c"
 ---
 
 # Einen Sync-Connector hinzufügen { #add-a-sync-connector }
@@ -449,7 +449,7 @@ Modelle zum Abschauen.
 ## Hinweise { #tips }
 
 - Setzen Sie `RemoteFile.source_path` auf einen eindeutigen URI (zum Beispiel `notion://page_id`) — er dient der Deduplizierung über Syncs hinweg, und er ist das, was das Entfernen vergleicht: Ein Dokument, dessen `source_path` eine vollständige Auflistung nicht mehr nennt, wird entfernt
-- Füllen Sie `RemoteFile.revision` aus der Auflistung, nie aus den heruntergeladenen Bytes, denn ihr Zweck ist, den Download zu sparen. Kann der Wert eine Änderung übersehen, etwa Größe und Änderungszeit, sagen Sie das im Docstring des Connectors: `new_only` und `update_only` vertrauen ihm, und ein `full`-Lauf ist die Abhilfe. `_fetch` gibt die Revision der geschriebenen Bytes zurück, oder `None`, denn der Sync speichert genau diese. Lösen Sie `ChangedSinceListing` aus, wenn sich die Datei während des Downloads geändert hat. Eine übersprungene Datei erreicht `_fetch` nie. Lehnt `_fetch` eine Datei aus einem Grund ab, der die Revision nicht ändert, etwa wegen einer robots.txt-Regel, prüfen Sie diesen Grund auch in der Auflistung
+- Füllen Sie `RemoteFile.revision` aus der Auflistung, nie aus den heruntergeladenen Bytes, denn ihr Zweck ist, den Download zu sparen. Kann der Wert eine Änderung übersehen, etwa Größe und Änderungszeit, sagen Sie das im Docstring des Connectors: `new_only` und `update_only` vertrauen ihm, und ein `full`-Lauf ist die Abhilfe. `_fetch` gibt die Revision der geschriebenen Bytes zurück, oder `None`, denn der Sync speichert genau diese. Lösen Sie `ChangedSinceListing` nur aus, wenn die Quelle zeigt, dass sich die Datei während des Downloads geändert hat oder verschwunden ist, etwa eine neue Version oder eine Auflistung, die die Datei nicht mehr nennt. Lösen Sie sie nie nur wegen eines fehlgeschlagenen Lesevorgangs aus: Ein Lesevorgang, der bei jedem Lauf fehlschlägt, würde dann bei jedem Lauf übersprungen. Eine übersprungene Datei erreicht `_fetch` nie. Lehnt `_fetch` eine Datei aus einem Grund ab, der die Revision nicht ändert, etwa wegen einer robots.txt-Regel, prüfen Sie diesen Grund auch in der Auflistung
 - Geben Sie `complete=False` aus einer Auflistung zurück, die vorzeitig angehalten hat, und werfen Sie nie eine Exception für eine, die Sie noch teilweise nutzen können
 - Umschließen Sie blockierende SDK-Aufrufe mit `asyncio.to_thread()`, damit sie den Event Loop nicht blockieren
 - Implementieren Sie `validate_config()`, um eine Konfiguration abzulehnen, die der Assistent noch beheben kann — eine `ConfigRefusal`, die ein `field` benennt, ist das, was ihn dieses Eingabefeld markieren lässt, statt einen Satz über vier davon zu zeigen. Sie sieht die Konfiguration und nicht die Zugangsdaten, also ist "kann dieser Key den Dienst erreichen" eine Frage für den ersten Sync und nicht für diese Methode
