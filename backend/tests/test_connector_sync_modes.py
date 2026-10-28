@@ -46,13 +46,17 @@ EMBEDDING_MODEL = "openai:text-embedding-3-small"
 
 
 def _stored(
-    *, content_hash: str, source_path: str = SOURCE_PATH, revision: str | None = None
+    *,
+    content_hash: str,
+    source_path: str = SOURCE_PATH,
+    revision: str | None = None,
+    filename: str = "handbook.md",
 ) -> MagicMock:
     """One row of a collection's document listing, as the store answers it."""
     return MagicMock(
         id="vector-doc-1",
         document_id="vector-doc-1",
-        filename="handbook.md",
+        filename=filename,
         additional_info={
             "source_path": source_path,
             "content_hash": content_hash,
@@ -412,7 +416,7 @@ def _restamps() -> tuple[AsyncMock, list[Restamp]]:
 
 
 class TestARevisionTheListingReports:
-    """#28. The hash saves the embedding and not the transfer, because a hash
+    """The hash saves the embedding and not the transfer, because a hash
     needs the bytes - so a nightly sync of a large bucket downloaded all of it
     to find that nothing had changed. A revision is what the remote system says
     about a file in its listing (an S3 `ETag`), read before the download."""
@@ -578,6 +582,48 @@ class TestARevisionTheListingReports:
         assert documents.claim_listed.await_args.kwargs["documents"] == {
             (SOURCE_PATH, "vector-doc-1")
         }
+
+    @staticmethod
+    def _an_upload_of_the_same_name(revision: str | None) -> MagicMock:
+        """A document the lookup finds by name only: an upload, whose
+        `source_path` is its filename - the listed address's last part."""
+        name = SOURCE_PATH.rsplit("/", 1)[-1]
+        return _stored(content_hash=BODY_HASH, source_path=name, filename=name, revision=revision)
+
+    @pytest.mark.parametrize("mode", ["new_only", "update_only"])
+    async def test_a_revision_on_a_document_matched_by_name_skips_nothing(self, mode: str):
+        """A revision speaks for one address. A connector that counts versions
+        per file can list "1" for two paths that share a basename, and a
+        document matched by that name would answer both: the second path was
+        skipped on the first one's revision, every run, and never ingested."""
+        connector = _connector(revision='"etag-1"')
+
+        answer, _ingest, _ = await _sync(
+            mode=mode,
+            listing=[self._an_upload_of_the_same_name('"etag-1"')],
+            connector=connector,
+        )
+
+        connector.download_file.assert_awaited_once()
+        assert answer["skipped"] == 1
+
+    async def test_a_document_matched_by_name_is_never_stamped_with_a_revision(self):
+        """The hash still decides for it, as before revisions. A revision
+        written onto it would be another path's, waiting to be compared."""
+        restamp, seen = _restamps()
+        connector = _connector(revision='"etag-1"')
+
+        answer, ingest, _ = await _sync(
+            mode="new_only",
+            listing=[self._an_upload_of_the_same_name(None)],
+            connector=connector,
+            restamp=restamp,
+        )
+
+        connector.download_file.assert_awaited_once()
+        ingest.assert_not_awaited()
+        assert seen == []
+        assert answer["skipped"] == 1
 
 
 class TestWhatTheSyncLogIsTold:

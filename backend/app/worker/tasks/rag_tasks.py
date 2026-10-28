@@ -1387,6 +1387,24 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                         if sync_mode == "update_only" and not existing.document_id:
                             skipped += 1
                             continue
+                        # A revision the listing reports, equal to the one stored
+                        # with the document, says "unchanged" before any transfer.
+                        # After `kept.add()`, as the skip above is: a file skipped
+                        # before its claim is one another source dropping the same
+                        # address could remove. `full` ignores it, as it ignores
+                        # the hash below: it is the remedy for a connector whose
+                        # revision can miss a change. Only at the document's own
+                        # address: a match by name is an upload, and a revision
+                        # from another path's listing says nothing about this one.
+                        at_address = existing.source_path == remote_file.source_path
+                        if (
+                            sync_mode != "full"
+                            and at_address
+                            and remote_file.revision
+                            and remote_file.revision == existing.revision
+                        ):
+                            skipped += 1
+                            continue
 
                         local_path = await connector.download_file(
                             remote_file, Path(tmp_dir), config=config, credential=credential
@@ -1406,6 +1424,15 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                                 == existing.content_hash
                             )
                         ):
+                            # The bytes are current but the revision moved - a file
+                            # touched, an object uploaded again - or the document
+                            # predates revisions. Recording the listed one is what
+                            # lets the next run skip the download. Never on a match
+                            # by name, for the reason the skip above gives.
+                            if remote_file.revision and at_address and existing.document_id:
+                                await ingester.restamp_revision(
+                                    collection_name, existing.document_id, remote_file.revision
+                                )
                             skipped += 1
                             continue
 
@@ -1462,6 +1489,7 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                                 # correct, tested, and with no data behind it
                                 # (#1777).
                                 organizational_unit=source.organizational_unit,
+                                revision=remote_file.revision,
                             )
 
                         await _settle_document_row(

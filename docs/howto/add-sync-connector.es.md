@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "15a149e19257"
 ---
 
 # Añade un sync connector { #add-a-sync-connector }
@@ -116,6 +116,13 @@ sobrescribe los dos, y también `SharePointConnector`, en
 |------|---------|------------------|
 | `remote_version(config, credential, previous)` | `None`: cada ejecución lista | La source puede decir de forma barata en qué punto está todo su contenido, como un commit o un token de cambios. Tras una ejecución sin ningún fallo, el sync guarda el valor junto con una huella de la configuración. La siguiente ejecución que encuentra el mismo par se detiene antes de `list_files()`. El valor tiene que cambiar siempre que haya podido cambiar cualquier archivo listado, o el propio listado. `previous` es el valor que guardó la última ejecución limpia con la misma configuración, o `None`. Una source que solo puede informar de lo que ha cambiado *desde* un punto, como un delta link de Graph, devuelve `previous` tal cual cuando no ha cambiado nada. |
 | `aclose()` | nada | El connector conserva algo entre `list_files()` y las descargas, como un clon o una sesión. Se llama una vez terminado el sync, tanto si ha salido bien como si no. |
+
+`remote_version()` responde por toda la source. Una source que solo puede
+describir cada archivo por separado informa en su lugar de una revisión para cada
+uno, en `RemoteFile.revision`: la versión que el listado da al archivo, como el
+`ETag` de un objeto. En `new_only` y `update_only`, el sync no descarga un archivo
+cuya revisión listada es igual a la guardada. El valor por defecto, `None`,
+mantiene la descarga y la comprobación de `content_hash`.
 
 ## Paso a paso: un connector de Notion { #step-by-step-a-notion-connector }
 
@@ -432,6 +439,7 @@ los connectors que vienen incluidos (`GoogleDriveConfig`, `S3Config`,
 ## Consejos { #tips }
 
 - Pon en `RemoteFile.source_path` un URI único (por ejemplo, `notion://page_id`) — sirve para deduplicar entre syncs, y es lo que compara la eliminación: un documento cuyo `source_path` ya no nombra un listado completo se elimina
+- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio. `_fetch` escribe los bytes de la revisión del listado o lanza una excepción, porque la sincronización guarda esa revisión con ellos. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
 - Devuelve `complete=False` desde un listado que se quedó corto, y nunca lances una excepción por uno que todavía puedes usar en parte
 - Envuelve con `asyncio.to_thread()` las llamadas bloqueantes de un SDK para que no bloqueen el event loop
 - Implementa `validate_config()` para rechazar una configuración que el asistente todavía puede arreglar — una `ConfigRefusal` que nombra un `field` es lo que hace que marque ese campo de entrada en lugar de mostrar una frase sobre cuatro de ellos. Ve la configuración y no la credencial, así que "puede esta clave llegar al servicio" es una pregunta para el primer sync, no para este método

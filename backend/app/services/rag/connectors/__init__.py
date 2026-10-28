@@ -31,13 +31,31 @@ class EmptyConfig(BaseModel):
 
 
 class RemoteFile(BaseModel):
-    """Metadata for a file from a remote source."""
+    """Metadata for a file from a remote source.
+
+    `revision` is the file's version as the remote system reports it in the
+    listing - an S3 `ETag`, a Git blob sha - never a value calculated from the
+    bytes, because its whole point is to be known before the download. The sync
+    stores it beside the document's `content_hash`, and in `new_only` and
+    `update_only` a listed revision equal to the stored one skips the download.
+    So equal revisions at one `source_path` must mean equal content. A
+    connector whose revision can miss a change says so in its docstring, and
+    `full` is the remedy for it. The sync stores the listed revision with
+    whatever `_fetch` wrote, so `_fetch` writes that revision's bytes or raises:
+    a file replaced between the listing and the download would otherwise be
+    filed under its old revision. A skipped file never reaches `_fetch`, so a
+    connector that refuses a file there for a reason the revision does not
+    cover - a robots.txt rule, a size limit lowered since - checks it in the
+    listing too, or reports no revision. `None` is "no revision": the file takes
+    the download and the hash, as every file did before.
+    """
 
     id: str
     name: str
     mime_type: str | None = None
     size: int | None = None
     modified_at: datetime | None = None
+    revision: str | None = None
     source_path: str  # Dedup key: "gdrive://file_id", "s3://bucket/key"
 
 

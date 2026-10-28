@@ -1,5 +1,5 @@
 ---
-source_sha: "b2690527c166"
+source_sha: "e66a47ad9f01"
 ---
 
 # Przetwarzanie plików { #file-processing }
@@ -1134,6 +1134,29 @@ jest odpowiedzią, której nic potem nie koryguje. Plik, który został zastąpi
 liczony jest jako **aktualizacja**, a nie ingestia, odczytywana z
 `replaced_document_id`, a nie z własnego zdania wyniku.
 
+Konektor może też podać rewizję każdego pliku w swoim listingu, w
+`RemoteFile.revision`. Taką rewizją jest `ETag` z S3. Synchronizacja zapisuje
+rewizję w metadanych wektorowych dokumentu, obok `content_hash`. W `new_only`
+i `update_only` synchronizacja pomija plik przed pobraniem, gdy jego rewizja
+z listingu jest równa zapisanej. Source nadal zgłasza roszczenie do pominiętego
+pliku, więc usuwanie go zostawia.
+
+Gdy rewizja się zmieniła, a hash nie,
+synchronizacja wpisuje nową rewizję do zapisanego dokumentu i niczego nie
+embeduje. Dokument zapisany bez rewizji dostaje ją w ten sam sposób, po jednym
+pobraniu. `full` ignoruje rewizję, tak jak ignoruje hash. Synchronizacja
+porównuje i zapisuje rewizję tylko dla dokumentu pod adresem z listingu.
+Dokument znaleziony tylko po nazwie, na przykład przesłany plik, zostaje przy
+ścieżce hasha.
+
+Rewizja to jedyne miejsce, w którym oba flow mogą dać różne odpowiedzi. Lokalna
+synchronizacja rozpoznaje niezmieniony plik wyłącznie po hashu, a to sprawdzenie
+jest dokładne. Dokładna rewizja, taka jak `ETag` z S3 albo sha bloba w Git, daje
+tę samą odpowiedź co hash. Rewizja, która może przeoczyć zmianę, taka jak rozmiar
+i czas modyfikacji, może sprawić, że `new_only` i `update_only` pominą rzadką
+edycję. Środkiem zaradczym jest `full`: pobiera i wciąga ponownie każdy plik.
+Konektor, którego rewizja może przeoczyć zmianę, pisze o tym w swoim docstringu.
+
 **Dwie rzeczy o dopasowywaniu, i obie decydują o tym, czy dokument przeżyje.**
 
 Przedostatnią deską ratunku dla `existing_document` jest dopasowanie po *nazwie
@@ -1368,7 +1391,10 @@ dostarcza klienta, `SCHEME` i to, które pole `CONFIG_MODEL` wskazuje kontener -
 `bucket` dla S3 i GCS, `container` dla Azure. `S3Connector` jest taką podklasą
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); jego dwa haki są
 celowo blokujące, bo blokujące są wszystkie trzy SDK, a wspólna klasa uruchamia
-je na wątku roboczym.
+je na wątku roboczym. Klient podaje `ETag` każdego obiektu w `StoredObject.etag`,
+a wspólne listowanie mapuje go na `RemoteFile.revision`. Pobranie prosi o ten
+`ETag`, więc obiekt zmieniony po listowaniu kończy się błędem i synchronizuje się
+przy następnym przebiegu.
 
 Trzy rzeczy nie są tanie, a konektor bez nich jest rachunkiem albo
 niespodzianką, a nie funkcją:
@@ -1377,12 +1403,15 @@ niespodzianką, a nie funkcją:
   [#990](https://github.com/vstorm-co/agenticos/issues/990), a tym, co porównuje,
   jest `content_hash` bajtów — co oznacza, że pobiera plik, żeby dowiedzieć się,
   że był niezmieniony. To oszczędza embedding, ale nie transfer. Konektor, który
-  umie odpowiedzieć na pytanie „zmienione?” *bez* bajtów, powinien napisać to
-  w swoim docstringu — token `delta` z Grapha, `version.number` strony, sha
-  commita, HTTP-owy `ETag` — bo sygnał, który flow umie przeczytać przed
-  pobraniem, jest różnicą między nocną synchronizacją kosztującą jedno listowanie
-  a taką, która kosztuje cały folder. `content_hash` jest awaryjnym rozwiązaniem
-  tam, gdzie zdalny system naprawdę nie oferuje żadnego.
+  umie odpowiedzieć na pytanie „zmienione?” *bez* bajtów, podaje tę odpowiedź —
+  dla każdego pliku w `RemoteFile.revision`, na przykład `ETag` obiektu albo
+  `version.number` strony, albo dla całego źródła w `remote_version()`, na
+  przykład token `delta` z Grapha albo sha commita — bo sygnał, który flow umie
+  przeczytać przed pobraniem, jest różnicą między nocną synchronizacją kosztującą
+  jedno listowanie a taką, która kosztuje cały folder. Rewizja pochodzi
+  z listowania, nigdy z bajtów. O rewizji, która może przeoczyć zmianę, mówi
+  docstring konektora. `content_hash` jest awaryjnym rozwiązaniem tam, gdzie
+  zdalny system naprawdę nie oferuje żadnego.
 - **Poświadczenie zawężone na źródle.** Zobacz sekcję wyżej. `SECRET_KIND`
   konektora mówi, jakiego kształtu jest poświadczenie; nic w platformie nie umie
   powiedzieć, jak szeroko je wydano, i dlatego wskazówka należy do miejsca,

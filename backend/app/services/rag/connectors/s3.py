@@ -14,7 +14,9 @@ or GCS connector is a client rather than a second copy of them (#988).
 """
 
 import logging
+import shutil
 from collections.abc import Iterator
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -149,6 +151,12 @@ class S3Connector(ObjectStoreConnector):
         boto3 hands `LastModified` over as a `datetime`; the string branch came
         with this loop and stays with it, in the client's own method, because
         which of the two arrives is the client's own vocabulary.
+
+        `ETag` is kept as S3 sends it, double quotes included: the sync compares
+        it with an earlier listing from this same call, so a value left verbatim
+        cannot differ between two versions of a transformation. An
+        S3-compatible store that sends none gives `None`, and that file takes
+        the download and the hash.
         """
         client = self._get_s3_client(config, credential)
         params: dict[str, Any] = {"Bucket": container}
@@ -160,7 +168,12 @@ class S3Connector(ObjectStoreConnector):
                 modified_at = obj.get("LastModified")
                 if isinstance(modified_at, str):
                     modified_at = datetime.fromisoformat(modified_at)
-                yield StoredObject(key=obj["Key"], size=obj.get("Size"), modified_at=modified_at)
+                yield StoredObject(
+                    key=obj["Key"],
+                    size=obj.get("Size"),
+                    modified_at=modified_at,
+                    etag=obj.get("ETag"),
+                )
 
     def _download(
         self,
@@ -169,5 +182,21 @@ class S3Connector(ObjectStoreConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
+        *,
+        etag: str | None,
     ) -> None:
-        self._get_s3_client(config, credential).download_file(container, key, str(dest_path))
+        """The listed version, or a `412 PreconditionFailed` that fails the file.
+
+        With an `ETag`, a conditional `GetObject` rather than the managed
+        transfer, because `download_file` takes no `IfMatch`. An object changed
+        since the listing is then refused by S3 itself, with no window between
+        a check and the read, and the next run lists its new `ETag`. Without
+        one, the managed transfer as before.
+        """
+        client = self._get_s3_client(config, credential)
+        if etag is None:
+            client.download_file(container, key, str(dest_path))
+            return
+        body = client.get_object(Bucket=container, Key=key, IfMatch=etag)["Body"]
+        with closing(body), dest_path.open("wb") as out:
+            shutil.copyfileobj(body, out, 1024 * 1024)

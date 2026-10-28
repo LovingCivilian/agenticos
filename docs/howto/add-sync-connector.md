@@ -109,6 +109,12 @@ and a connector overrides one when its source can answer the question it asks.
 | `remote_version(config, credential, previous)` | `None`: every run lists | The source can say cheaply what its whole content is at, such as a commit or a change token. After a run with nothing failed, the sync stores the value with a fingerprint of the configuration. The next run that finds the same pair stops before `list_files()`. The value must change whenever any listed file, or the listing itself, could have changed. `previous` is the value the last clean run stored under the same configuration, or `None`. A source that can only report what changed *since* a point, such as a Graph delta link, answers `previous` back when nothing has changed. |
 | `aclose()` | nothing | The connector keeps something between `list_files()` and the downloads, such as a clone or a session. It is called once the sync is over, whether the sync succeeded or not. |
 
+`remote_version()` answers for the whole source. A source that can only describe
+each file reports a revision for each one instead, in `RemoteFile.revision`: the
+version the listing gives the file, such as an object's `ETag`. In `new_only` and
+`update_only`, the sync does not download a file whose listed revision equals the
+stored one. The default, `None`, keeps the download and the `content_hash` check.
+
 ## Step by step: a Notion connector
 
 This example implements a Notion connector that fetches pages from a Notion
@@ -421,6 +427,7 @@ connectors (`GoogleDriveConfig`, `S3Config`, `WebConfig`) are the models to copy
 ## Tips
 
 - Set `RemoteFile.source_path` to a unique URI (e.g., `notion://page_id`) — this is used for deduplication across syncs, and it is what removal compares: a document whose `source_path` a complete listing no longer names is removed
+- Fill `RemoteFile.revision` from the listing, never from the downloaded bytes, because its purpose is to skip the download. If the value can miss a change, such as a size and a modification time, say so in the connector's docstring: `new_only` and `update_only` trust it, and a `full` run is the remedy. `_fetch` writes the bytes of the listed revision or raises, because the sync stores that revision with them. A skipped file never reaches `_fetch`. If `_fetch` refuses a file for a reason that does not change the revision, such as a robots.txt rule, check that reason in the listing too
 - Return `complete=False` from a listing that stopped short, and never raise for one you can still partly use
 - Use `asyncio.to_thread()` to wrap blocking SDK calls so they don't block the event loop
 - Implement `validate_config()` to refuse a config the wizard can still fix — a `ConfigRefusal` naming a `field` is what makes it mark that input rather than show a sentence over four of them. It sees the config and not the credential, so "can this key reach the service" is a question for the first sync, not for this method

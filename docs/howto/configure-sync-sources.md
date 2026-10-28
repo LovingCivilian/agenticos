@@ -140,9 +140,9 @@ in the UI you can also do with `curl` or any HTTP client.
 
 | Mode | Behavior |
 |------|----------|
-| `full` | Re-sync everything. All files are (re-)ingested, existing documents replaced. |
-| `new_only` | Add new files + update changed files. Uses SHA-256 hash to detect changes — unchanged files are skipped. |
-| `update_only` | Only update files already in the collection. New files are skipped. Uses SHA-256 hash to skip unchanged files. |
+| `full` | Re-sync everything. All files are (re-)ingested, existing documents replaced. It ignores revisions and hashes, so run it when a connector's revision can miss a change. |
+| `new_only` | Add new files + update changed files. Uses the connector's revision, then the SHA-256 hash, to detect changes — unchanged files are skipped. |
+| `update_only` | Only update files already in the collection. New files are skipped. Uses the connector's revision, then the SHA-256 hash, to skip unchanged files. |
 
 !!! tip "`new_only` for most workflows"
 
@@ -175,9 +175,12 @@ a sync of the source lists it again.
 
 A sync after the first one does as little as the source lets it:
 
-- **An unchanged file costs a download, not an embedding.** Its SHA-256 matches
-  the stored document's, so it is counted as `skipped` and never parsed or
-  embedded again.
+- **An unchanged file costs at most a download, never an embedding.** Its SHA-256
+  matches the stored document's, so it is counted as `skipped` and never parsed or
+  embedded again. A connector that reports a revision for each file saves the
+  download too. S3 reports each object's `ETag`, so `new_only` and `update_only`
+  skip an object with an unchanged `ETag` before the download. `full` downloads
+  every file.
 - **An unchanged source costs one request.** A connector that can say what its
   whole content is at — a Git branch's head commit, a SharePoint library's change
   feed — records that after every run that finished with nothing failed. The next `new_only` or `update_only` run that

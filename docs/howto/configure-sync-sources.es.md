@@ -1,5 +1,5 @@
 ---
-source_sha: "593e85034342"
+source_sha: "37ea49d969bd"
 ---
 
 # Configura las fuentes de sincronización { #configure-sync-sources }
@@ -147,9 +147,9 @@ cualquier cliente HTTP.
 
 | Modo | Comportamiento |
 |------|----------|
-| `full` | Sincroniza todo de nuevo. Todos los archivos se (re)ingestan y los documentos existentes se reemplazan. |
-| `new_only` | Añade los archivos nuevos y actualiza los que han cambiado. Usa un hash SHA-256 para detectar cambios: los archivos sin cambios se omiten. |
-| `update_only` | Solo actualiza archivos que ya están en la colección. Los archivos nuevos se omiten. Usa un hash SHA-256 para omitir los archivos sin cambios. |
+| `full` | Sincroniza todo de nuevo. Todos los archivos se (re)ingestan y los documentos existentes se reemplazan. Ignora las revisiones y los hashes, así que ejecútalo cuando la revisión de un connector pueda pasar por alto un cambio. |
+| `new_only` | Añade los archivos nuevos y actualiza los que han cambiado. Usa la revisión del connector y después un hash SHA-256 para detectar cambios: los archivos sin cambios se omiten. |
+| `update_only` | Solo actualiza archivos que ya están en la colección. Los archivos nuevos se omiten. Usa la revisión del connector y después un hash SHA-256 para omitir los archivos sin cambios. |
 
 !!! tip "`new_only` para casi todos los flujos"
 
@@ -188,9 +188,12 @@ la fuente vuelva a listarlo.
 Una sincronización posterior a la primera hace tan poco como la fuente le
 permite:
 
-- **Un archivo sin cambios cuesta una descarga, no un embedding.** Su SHA-256
-  coincide con el del documento almacenado, así que se cuenta como `skipped` y
-  no se vuelve a parsear ni a embeber.
+- **Un archivo sin cambios cuesta como mucho una descarga, nunca un embedding.**
+  Su SHA-256 coincide con el del documento almacenado, así que se cuenta como
+  `skipped` y no se vuelve a parsear ni a embeber. Un connector que informa de una
+  revisión para cada archivo se ahorra también la descarga. S3 informa del `ETag`
+  de cada objeto, así que `new_only` y `update_only` omiten un objeto con el
+  `ETag` sin cambios antes de la descarga. `full` descarga todos los archivos.
 - **Una fuente sin cambios cuesta una petición.** Un connector capaz de decir en
   qué punto está todo su contenido —el commit de cabeza de una rama de Git, el
   feed de cambios de una biblioteca de SharePoint— lo registra después de cada ejecución que termina sin ningún fallo. La siguiente

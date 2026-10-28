@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "15a149e19257"
 ---
 
 # Einen Sync-Connector hinzufügen { #add-a-sync-connector }
@@ -122,6 +122,13 @@ beantworten kann, die sie stellt. `GitConnector` in
 |------|---------|---------------------|
 | `remote_version(config, credential, previous)` | `None`: jeder Lauf listet auf | Die Quelle kann günstig sagen, auf welchem Stand ihr gesamter Inhalt ist, etwa ein Commit oder ein Change-Token. Nach einem Lauf ohne fehlgeschlagene Datei speichert der Sync den Wert zusammen mit einem Fingerabdruck der Konfiguration. Der nächste Lauf, der dasselbe Paar vorfindet, hält vor `list_files()` an. Der Wert muss sich ändern, sobald sich eine aufgelistete Datei oder die Auflistung selbst geändert haben könnte. `previous` ist der Wert, den der letzte saubere Lauf unter derselben Konfiguration gespeichert hat, oder `None`. Eine Quelle, die nur melden kann, was sich *seit* einem Punkt geändert hat, etwa ein Graph-Delta-Link, antwortet mit `previous`, wenn sich nichts geändert hat. |
 | `aclose()` | nichts | Der Connector hält zwischen `list_files()` und den Downloads etwas vor, etwa einen Klon oder eine Session. Es wird aufgerufen, sobald der Sync vorbei ist, ob er erfolgreich war oder nicht. |
+
+`remote_version()` antwortet für die ganze Quelle. Eine Quelle, die nur jede
+Datei einzeln beschreiben kann, meldet stattdessen für jede eine Revision, in
+`RemoteFile.revision`: die Version, die die Auflistung der Datei gibt, etwa das
+`ETag` eines Objekts. In `new_only` und `update_only` lädt der Sync keine Datei
+herunter, deren aufgelistete Revision der gespeicherten gleicht. Die Vorgabe,
+`None`, behält den Download und die Prüfung von `content_hash`.
 
 ## Schritt für Schritt: ein Notion-Connector { #step-by-step-a-notion-connector }
 
@@ -441,6 +448,7 @@ Modelle zum Abschauen.
 ## Hinweise { #tips }
 
 - Setzen Sie `RemoteFile.source_path` auf einen eindeutigen URI (zum Beispiel `notion://page_id`) — er dient der Deduplizierung über Syncs hinweg, und er ist das, was das Entfernen vergleicht: Ein Dokument, dessen `source_path` eine vollständige Auflistung nicht mehr nennt, wird entfernt
+- Füllen Sie `RemoteFile.revision` aus der Auflistung, nie aus den heruntergeladenen Bytes, denn ihr Zweck ist, den Download zu sparen. Kann der Wert eine Änderung übersehen, etwa Größe und Änderungszeit, sagen Sie das im Docstring des Connectors: `new_only` und `update_only` vertrauen ihm, und ein `full`-Lauf ist die Abhilfe. `_fetch` schreibt die Bytes der aufgelisteten Revision oder löst eine Ausnahme aus, denn der Sync speichert diese Revision mit ihnen. Eine übersprungene Datei erreicht `_fetch` nie. Lehnt `_fetch` eine Datei aus einem Grund ab, der die Revision nicht ändert, etwa wegen einer robots.txt-Regel, prüfen Sie diesen Grund auch in der Auflistung
 - Geben Sie `complete=False` aus einer Auflistung zurück, die vorzeitig angehalten hat, und werfen Sie nie eine Exception für eine, die Sie noch teilweise nutzen können
 - Umschließen Sie blockierende SDK-Aufrufe mit `asyncio.to_thread()`, damit sie den Event Loop nicht blockieren
 - Implementieren Sie `validate_config()`, um eine Konfiguration abzulehnen, die der Assistent noch beheben kann — eine `ConfigRefusal`, die ein `field` benennt, ist das, was ihn dieses Eingabefeld markieren lässt, statt einen Satz über vier davon zu zeigen. Sie sieht die Konfiguration und nicht die Zugangsdaten, also ist "kann dieser Key den Dienst erreichen" eine Frage für den ersten Sync und nicht für diese Methode

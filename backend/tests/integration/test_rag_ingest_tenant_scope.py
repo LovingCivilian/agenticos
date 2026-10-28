@@ -236,7 +236,7 @@ async def test_a_deployment_wide_collection_sees_only_untagged_rows(engine: Asyn
 
 async def test_org_a_cannot_refresh_the_revision_of_org_bs_document(engine: AsyncEngine) -> None:
     """Even naming Org B's own vector id: the refresh is a write by id, and on a
-    shared table the id alone reaches every tenant's rows under it (#28)."""
+    shared table the id alone reaches every tenant's rows under it."""
     store = _store(engine)
     await store._ensure_collection(COLLECTION)
     await _insert(store, doc_id="doc-b", tenant=ORG_B, revision='"etag-1"')

@@ -18,11 +18,13 @@ only correct if a stored source syncs exactly the way it did before it.
 
 import datetime
 import inspect
+import io
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field, SecretStr
 
 from app.core.exceptions import BadRequestError
@@ -50,6 +52,7 @@ class BlobConnector(ObjectStoreConnector):
         self.objects = objects or []
         self.listed: list[tuple[str, str]] = []
         self.downloaded: list[tuple[str, str, Path]] = []
+        self.fetched_etags: list[str | None] = []
 
     def _objects(
         self,
@@ -68,8 +71,11 @@ class BlobConnector(ObjectStoreConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
+        *,
+        etag: str | None,
     ) -> None:
         self.downloaded.append((container, key, dest_path))
+        self.fetched_etags.append(etag)
         dest_path.write_bytes(b"contents")
 
 
@@ -128,7 +134,7 @@ class TestWhatEveryObjectStoreGetsForFree:
         assert (files[0].size, files[0].modified_at) == (41, when)
 
     async def test_an_objects_etag_is_its_revision(self):
-        """What the sync compares before it downloads (#28): every store has an
+        """What the sync compares before it downloads: every store has an
         ETag, and an equal one means unchanged content. The shared listing maps
         it, so the next store only has to report it."""
         connector = BlobConnector([StoredObject(key="a.md", etag='"0x8DC1A2B3C4D5E6F"')])
@@ -139,7 +145,7 @@ class TestWhatEveryObjectStoreGetsForFree:
 
     async def test_an_object_listed_without_an_etag_has_no_revision(self):
         """No revision is never "unchanged": the file takes the download and the
-        hash, as every file did before #28."""
+        hash, as every file did before revisions."""
         connector = BlobConnector([StoredObject(key="a.md")])
 
         files = (await connector.list_files({"container": "docs"}, None)).files
@@ -163,6 +169,24 @@ class TestWhatEveryObjectStoreGetsForFree:
 
         assert connector.downloaded == [("docs", "legal/nda.pdf", tmp_path / "nda.pdf")]
         assert landed.read_bytes() == b"contents"
+
+    async def test_the_download_asks_for_the_version_the_listing_reported(self, tmp_path: Path):
+        """The sync files what `_download` wrote under the listed revision, so
+        the store has to be told which version that is - an object replaced
+        after the listing must not be stored under the old `ETag`."""
+        connector = BlobConnector()
+
+        await connector.download_file(
+            RemoteFile(
+                id="nda.pdf",
+                name="nda.pdf",
+                source_path="azblob://docs/nda.pdf",
+                revision='"0x8DC1A2B3C4D5E6F"',
+            ),
+            tmp_path,
+        )
+
+        assert connector.fetched_etags == ['"0x8DC1A2B3C4D5E6F"']
 
     async def test_a_name_climbing_out_of_the_sync_directory_is_refused(self, tmp_path: Path):
         """Inherited from `BaseSyncConnector.download_file`, and asserted here
@@ -298,3 +322,58 @@ class TestTheS3ConnectorStillListsWhatItListed:
 
         client.download_file.assert_called_once_with("acme", "legal/nda.pdf", str(landed))
         assert landed.read_bytes() == b"pdf"
+
+    async def test_a_download_with_a_listed_etag_is_conditional_on_it(self, tmp_path: Path):
+        """`download_file` takes no `IfMatch`, so a listed `ETag` means a
+        `GetObject` that S3 itself refuses for any other version."""
+        client = MagicMock()
+        client.get_object.return_value = {"Body": io.BytesIO(b"pdf")}
+        with patch.object(S3Connector, "_get_s3_client", return_value=client):
+            landed = await S3Connector().download_file(
+                RemoteFile(
+                    id="legal/nda.pdf",
+                    name="nda.pdf",
+                    source_path="s3://acme/legal/nda.pdf",
+                    revision='"9b2cf535f27731c974343645a3985328"',
+                ),
+                tmp_path,
+                config={"bucket": "acme"},
+                credential=self._credential(),
+            )
+
+        client.get_object.assert_called_once_with(
+            Bucket="acme", Key="legal/nda.pdf", IfMatch='"9b2cf535f27731c974343645a3985328"'
+        )
+        client.download_file.assert_not_called()
+        assert landed.read_bytes() == b"pdf"
+
+    async def test_an_object_changed_since_its_listing_fails_its_download(self, tmp_path: Path):
+        """Raised, not swallowed: the sync counts the file as failed, stores no
+        revision for bytes it never read, and the next listing has the new one."""
+        client = MagicMock()
+        client.get_object.side_effect = ClientError(
+            {
+                "Error": {
+                    "Code": "PreconditionFailed",
+                    "Message": "At least one of the pre-conditions you specified did not hold",
+                }
+            },
+            "GetObject",
+        )
+        with (
+            patch.object(S3Connector, "_get_s3_client", return_value=client),
+            pytest.raises(ClientError),
+        ):
+            await S3Connector().download_file(
+                RemoteFile(
+                    id="legal/nda.pdf",
+                    name="nda.pdf",
+                    source_path="s3://acme/legal/nda.pdf",
+                    revision='"9b2cf535f27731c974343645a3985328"',
+                ),
+                tmp_path,
+                config={"bucket": "acme"},
+                credential=self._credential(),
+            )
+
+        assert not (tmp_path / "nda.pdf").exists()

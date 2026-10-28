@@ -1,5 +1,5 @@
 ---
-source_sha: "b2690527c166"
+source_sha: "e66a47ad9f01"
 ---
 
 # Procesamiento de archivos { #file-processing }
@@ -1150,6 +1150,30 @@ puede haber cambiado es la respuesta que nada corrige después. Un archivo
 sustituido se cuenta como **actualización** y no como ingesta, leído de
 `replaced_document_id` y no de la frase que devuelve el resultado.
 
+Un conector también puede informar de una revisión para cada archivo de su
+listado, en `RemoteFile.revision`. Un `ETag` de S3 es una. La sincronización
+guarda la revisión en los metadatos vectoriales del documento, junto a
+`content_hash`. En `new_only` y `update_only`, la sincronización omite un archivo
+antes de la descarga cuando su revisión listada es igual a la guardada. La fuente
+sigue reclamando el archivo omitido, así que la eliminación lo conserva.
+
+Cuando la
+revisión ha cambiado y el hash no, la sincronización escribe la nueva revisión en
+el documento guardado y no genera ningún embedding. Un documento guardado sin
+revisión recibe una del mismo modo, tras una descarga. `full` ignora la revisión,
+igual que ignora el hash. La sincronización compara y guarda una revisión solo
+para un documento en la dirección del listado. Un documento encontrado solo por
+su nombre, como una subida, sigue el camino del hash.
+
+La revisión es el único punto en el que los dos flows pueden dar respuestas
+distintas. La sincronización local reconoce un archivo sin cambios solo por su
+hash, y esa comprobación es exacta. Una revisión exacta, como un `ETag` de S3 o un
+sha de blob de Git, da la misma respuesta que el hash. Una revisión que puede
+pasar por alto un cambio, como un tamaño y una hora de modificación, puede hacer
+que `new_only` y `update_only` omitan una edición poco frecuente. `full` es el
+remedio: descarga e ingiere de nuevo cada archivo. Un conector cuya revisión puede
+pasar por alto un cambio lo dice en su docstring.
+
 **Dos cosas sobre el emparejado, y las dos deciden si un documento sobrevive.**
 
 El penúltimo recurso de `existing_document` es un emparejado por *nombre de
@@ -1388,7 +1412,10 @@ directorio, y una subclase aporta un cliente, un `SCHEME` y qué campo del
 Azure. `S3Connector` es esa subclase
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); sus dos hooks son
 bloqueantes a propósito, porque los tres SDK lo son, y la clase compartida los
-ejecuta en un hilo de worker.
+ejecuta en un hilo de worker. Un cliente informa del `ETag` de cada objeto en
+`StoredObject.etag`, y el listado compartido lo asigna a `RemoteFile.revision`.
+La descarga pide ese `ETag`, así que un objeto cambiado desde el listado falla y
+se sincroniza en la siguiente ejecución.
 
 Hay tres cosas que no son baratas, y un conector sin ellas es una factura o una
 sorpresa en vez de una funcionalidad:
@@ -1397,12 +1424,15 @@ sorpresa en vez de una funcionalidad:
   [#990](https://github.com/vstorm-co/agenticos/issues/990), y lo que compara es un
   `content_hash` de los bytes — lo que significa que descarga un archivo para
   averiguar que no había cambiado. Eso ahorra el embedding y no la transferencia.
-  Un conector que sepa responder a "¿ha cambiado?" *sin* los bytes debería decirlo
-  en su docstring — un token `delta` de Graph, el `version.number` de una página,
-  un sha de commit, un `ETag` de HTTP — porque una señal que el flow pueda leer
-  antes de la descarga es la diferencia entre una sincronización nocturna que
-  cuesta un listado y una que cuesta la carpeta entera. `content_hash` es el
-  recurso de reserva para cuando el sistema remoto no ofrece ninguna.
+  Un conector que sepa responder a "¿ha cambiado?" *sin* los bytes lo informa —
+  para cada archivo en `RemoteFile.revision`, como el `ETag` de un objeto o el
+  `version.number` de una página, o para toda la fuente en `remote_version()`,
+  como un token `delta` de Graph o un sha de commit — porque una señal que el flow
+  pueda leer antes de la descarga es la diferencia entre una sincronización
+  nocturna que cuesta un listado y una que cuesta la carpeta entera. La revisión
+  sale del listado, nunca de los bytes. De una revisión que puede pasar por alto un
+  cambio avisa el docstring del conector. `content_hash` es el recurso de reserva
+  para cuando el sistema remoto no ofrece ninguna.
 - **Una credencial acotada en la fuente.** Véase la sección anterior. El
   `SECRET_KIND` de un conector dice qué forma tiene la credencial; nada en la
   plataforma puede decir con cuánta amplitud se emitió, y por eso la orientación va

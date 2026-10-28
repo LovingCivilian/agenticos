@@ -1,5 +1,5 @@
 ---
-source_sha: "593e85034342"
+source_sha: "37ea49d969bd"
 ---
 
 # Sync-Quellen einrichten { #configure-sync-sources }
@@ -148,9 +148,9 @@ HTTP-Client tun.
 
 | Modus | Verhalten |
 |------|----------|
-| `full` | Alles neu synchronisieren. Alle Dateien werden (erneut) aufgenommen, vorhandene Dokumente ersetzt. |
-| `new_only` | Neue Dateien hinzufügen und geänderte aktualisieren. Änderungen werden über einen SHA-256-Hash erkannt — unveränderte Dateien werden übersprungen. |
-| `update_only` | Nur Dateien aktualisieren, die bereits in der Collection liegen. Neue Dateien werden übersprungen. Ein SHA-256-Hash überspringt unveränderte Dateien. |
+| `full` | Alles neu synchronisieren. Alle Dateien werden (erneut) aufgenommen, vorhandene Dokumente ersetzt. Dieser Modus ignoriert Revisionen und Hashes. Führen Sie ihn aus, wenn die Revision eines Connectors eine Änderung übersehen kann. |
+| `new_only` | Neue Dateien hinzufügen und geänderte aktualisieren. Änderungen werden über die Revision des Connectors, dann über einen SHA-256-Hash erkannt — unveränderte Dateien werden übersprungen. |
+| `update_only` | Nur Dateien aktualisieren, die bereits in der Collection liegen. Neue Dateien werden übersprungen. Die Revision des Connectors und danach ein SHA-256-Hash überspringen unveränderte Dateien. |
 
 !!! tip "`new_only` für die meisten Abläufe"
 
@@ -189,9 +189,13 @@ ein Sync der Quelle es wieder auflistet.
 
 Ein Sync nach dem ersten tut so wenig, wie die Quelle es zulässt:
 
-- **Eine unveränderte Datei kostet einen Download, keine Einbettung.** Ihr
-  SHA-256 stimmt mit dem des gespeicherten Dokuments überein, also wird sie als
-  `skipped` gezählt und weder erneut geparst noch eingebettet.
+- **Eine unveränderte Datei kostet höchstens einen Download, nie eine
+  Einbettung.** Ihr SHA-256 stimmt mit dem des gespeicherten Dokuments überein,
+  also wird sie als `skipped` gezählt und weder erneut geparst noch eingebettet.
+  Ein Connector, der für jede Datei eine Revision meldet, spart auch den Download.
+  S3 meldet das `ETag` jedes Objekts, also überspringen `new_only` und
+  `update_only` ein Objekt mit unverändertem `ETag` vor dem Download. `full` lädt
+  jede Datei herunter.
 - **Eine unveränderte Quelle kostet eine Anfrage.** Ein Connector, der sagen
   kann, auf welchem Stand sein gesamter Inhalt ist — der Head-Commit eines
   Git-Branches, der Änderungsfeed einer SharePoint-Bibliothek —, hält diesen Stand nach jedem Lauf fest, der ohne

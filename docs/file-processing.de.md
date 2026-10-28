@@ -1,5 +1,5 @@
 ---
-source_sha: "b2690527c166"
+source_sha: "e66a47ad9f01"
 ---
 
 # Dateiverarbeitung { #file-processing }
@@ -1202,6 +1202,31 @@ ist die Antwort, die nichts später korrigiert. Eine ersetzte Datei wird als
 **Aktualisierung** gezählt statt als Ingestion, abgelesen an
 `replaced_document_id` statt am eigenen Satz des Ergebnisses.
 
+Ein Connector kann in seiner Auflistung außerdem für jede Datei eine Revision
+melden, in `RemoteFile.revision`. Ein S3-`ETag` ist eine solche. Der Sync
+speichert die Revision in den Vektor-Metadaten des Dokuments, neben
+`content_hash`. In `new_only` und `update_only` überspringt der Sync eine Datei
+vor dem Download, wenn ihre aufgelistete Revision der gespeicherten gleicht. Die
+Source beansprucht die übersprungene Datei weiterhin, das Entfernen behält sie
+also.
+
+Hat sich die Revision geändert und der Hash nicht, schreibt der Sync die
+neue Revision in das gespeicherte Dokument und bettet nichts ein. Ein ohne
+Revision gespeichertes Dokument bekommt so eine, nach einem Download. `full`
+ignoriert die Revision, wie es den Hash ignoriert. Der Sync vergleicht und
+speichert eine Revision nur für ein Dokument unter der aufgelisteten Adresse.
+Ein Dokument, das nur über seinen Namen gefunden wird, etwa ein Upload, bleibt
+beim Hash-Weg.
+
+Die Revision ist die einzige Stelle, an der die beiden Flows verschiedene
+Antworten geben können. Der lokale Sync erkennt eine unveränderte Datei nur an
+ihrem Hash, und diese Prüfung ist exakt. Eine exakte Revision, etwa ein S3-`ETag`
+oder eine Git-Blob-Sha, gibt dieselbe Antwort wie der Hash. Eine Revision, die
+eine Änderung übersehen kann, etwa Größe und Änderungszeit, kann `new_only` und
+`update_only` eine seltene Bearbeitung überspringen lassen. `full` ist die
+Abhilfe: Es lädt jede Datei herunter und liest sie neu ein. Ein Connector, dessen
+Revision eine Änderung übersehen kann, sagt das in seinem Docstring.
+
 **Zwei Dinge zum Abgleich, und beide entscheiden, ob ein Dokument überlebt.**
 
 Das vorletzte Mittel von `existing_document` ist ein Treffer auf den
@@ -1452,7 +1477,11 @@ und eine Unterklasse liefert einen Client, ein `SCHEME` und die Angabe, welches
 Azure. `S3Connector` ist diese Unterklasse
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); seine beiden Hooks
 sind bewusst blockierend, denn alle drei SDKs sind es, und die gemeinsame Klasse
-führt sie auf einem Worker-Thread aus.
+führt sie auf einem Worker-Thread aus. Ein Client meldet das `ETag` jedes Objekts
+in `StoredObject.etag`, und die gemeinsame Auflistung bildet es auf
+`RemoteFile.revision` ab. Der Download fordert genau dieses `ETag` an. Ein seit
+der Auflistung geändertes Objekt schlägt daher fehl und wird beim nächsten Lauf
+synchronisiert.
 
 Drei Dinge sind nicht günstig, und ein Connector ohne sie ist eine Rechnung oder
 eine Überraschung statt einer Funktion:
@@ -1462,11 +1491,14 @@ eine Überraschung statt einer Funktion:
   vergleicht, ist ein `content_hash` der Bytes — was heißt, dass er eine Datei
   herunterlädt, um herauszufinden, dass sie unverändert war. Das spart das Embedding
   und nicht die Übertragung. Ein Connector, der "geändert?" *ohne* die Bytes
-  beantworten kann, sollte das in seinem Docstring sagen — ein `delta`-Token aus
-  Graph, die `version.number` einer Seite, eine Commit-Sha, ein HTTP-`ETag` — denn
-  ein Signal, das der Flow vor dem Download lesen kann, ist der Unterschied
-  zwischen einem nächtlichen Sync, der eine Auflistung kostet, und einem, der den
-  ganzen Ordner kostet. `content_hash` ist der Rückfall dort, wo das entfernte
+  beantworten kann, meldet das — für jede Datei in `RemoteFile.revision`, etwa das
+  `ETag` eines Objekts oder die `version.number` einer Seite, oder für die ganze
+  Source in `remote_version()`, etwa ein `delta`-Token aus Graph oder eine
+  Commit-Sha — denn ein Signal, das der Flow vor dem Download lesen kann, ist der
+  Unterschied zwischen einem nächtlichen Sync, der eine Auflistung kostet, und
+  einem, der den ganzen Ordner kostet. Die Revision stammt aus der Auflistung, nie
+  aus den Bytes. Eine Revision, die eine Änderung übersehen kann, nennt der
+  Docstring des Connectors. `content_hash` ist der Rückfall dort, wo das entfernte
   System ehrlich keines anbietet.
 - **Zugangsdaten, die an der Source begrenzt sind.** Siehe den Abschnitt oben. Das
   `SECRET_KIND` eines Connectors sagt, welche Form die Zugangsdaten haben; nichts in

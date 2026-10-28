@@ -42,13 +42,17 @@ logger = logging.getLogger(__name__)
 class StoredObject(BaseModel):
     """One object in a listing, in the terms all three stores describe one in.
 
-    Deliberately not an `etag`. Every object store offers one and the sync path
-    reads none: it compares a `content_hash` of the bytes it downloaded (#990),
-    so an `etag` carried here would be a field nothing reads. A connector that
-    can answer "changed?" *without* the bytes is worth having - it saves the
-    transfer, not just the embedding - and `docs/file-processing.md` says so under
-    what a new connector owes; the place to add it is there and then, with the
-    caller that reads it.
+    `etag` is the object's revision: the sync compares it with the one
+    stored beside the document and skips the download when they are equal, which
+    saves the transfer and not only the embedding. Every object store has one,
+    and it changes whenever the content does. It is not always a hash of the
+    bytes: an S3 multipart upload's `ETag` is the MD5 of its parts' MD5s with a
+    `-<parts>` suffix, and an SSE-KMS or SSE-C object's is no MD5 at all. So the
+    same bytes uploaded again with another part size, or copied, can get a new
+    one. That costs one download, after which the hash finds the content
+    unchanged and the stored revision is refreshed - never a skipped change.
+    `_download` is handed the listed `etag` so that what it writes is that
+    version, not whatever the object became after the listing.
 
     `modified_at` is carried because `RemoteFile` already has somewhere to put
     it.
@@ -57,6 +61,7 @@ class StoredObject(BaseModel):
     key: str
     size: int | None = None
     modified_at: datetime | None = None
+    etag: str | None = None
 
 
 class ObjectStoreConnector(BaseSyncConnector):
@@ -120,6 +125,7 @@ class ObjectStoreConnector(BaseSyncConnector):
                 name=Path(obj.key).name,
                 size=obj.size,
                 modified_at=obj.modified_at,
+                revision=obj.etag,
                 source_path=f"{self.SCHEME}://{container}/{obj.key}",
             )
             for obj in self._objects(container, prefix, config, credential)
@@ -135,7 +141,9 @@ class ObjectStoreConnector(BaseSyncConnector):
     ) -> None:
         """Write one object to the path the base class chose."""
         container = file.source_path.removeprefix(f"{self.SCHEME}://").split("/", 1)[0]
-        await asyncio.to_thread(self._download, container, file.id, dest_path, config, credential)
+        await asyncio.to_thread(
+            self._download, container, file.id, dest_path, config, credential, etag=file.revision
+        )
         logger.info(
             "Downloaded %s://%s/%s (%d bytes)",
             self.SCHEME,
@@ -168,5 +176,14 @@ class ObjectStoreConnector(BaseSyncConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
+        *,
+        etag: str | None,
     ) -> None:
-        """Write one object's bytes to `dest_path`. Blocking, on a worker thread."""
+        """Write one object's bytes to `dest_path`. Blocking, on a worker thread.
+
+        `etag` is the one the listing reported, and the bytes written must be
+        that version's or this raises. The sync stores the listed revision with
+        what this wrote, so an object replaced between the listing and the
+        download would otherwise be filed under the old `ETag` - and skipped on
+        every run after its old bytes came back. `None` is no listed `ETag`.
+        """

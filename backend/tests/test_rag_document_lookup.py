@@ -100,7 +100,9 @@ class TestOnePrecedenceForBothAnswers:
 
         existing = await service.existing_document("kb", "/srv/sync/handbook.pdf")
 
-        assert existing == StoredDocument(document_id="doc-b", content_hash="hash-b")
+        assert existing == StoredDocument(
+            document_id="doc-b", content_hash="hash-b", source_path="/srv/sync/handbook.pdf"
+        )
 
     async def test_a_filename_match_answers_when_no_source_path_does(self):
         service = _service(
@@ -166,11 +168,13 @@ class TestOnePrecedenceForBothAnswers:
 
         existing = await service.existing_document("kb", "/srv/sync/handbook.pdf")
 
-        assert existing == StoredDocument(document_id="doc-a", content_hash=None)
+        assert existing == StoredDocument(
+            document_id="doc-a", content_hash=None, source_path="/srv/sync/handbook.pdf"
+        )
 
 
 class TestTheRevisionTravelsWithTheDocument:
-    """A connector's revision is a third fact about the stored document (#28),
+    """A connector's revision is a third fact about the stored document,
     returned with the id and the hash for the reason those two are returned
     together: a sync that compared a listed revision against another document's
     would skip a download on the strength of the wrong file (#548)."""
@@ -198,11 +202,14 @@ class TestTheRevisionTravelsWithTheDocument:
         existing = await service.existing_document("kb", "s3://acme/handbook.pdf")
 
         assert existing == StoredDocument(
-            document_id="doc-b", content_hash="hash-b", revision='"etag-b"'
+            document_id="doc-b",
+            content_hash="hash-b",
+            source_path="s3://acme/handbook.pdf",
+            revision='"etag-b"',
         )
 
     async def test_a_document_stored_without_a_revision_answers_none(self):
-        """Every document synced before #28, and every upload and local sync."""
+        """Every document synced before revisions, and every upload and local sync."""
         service = _service(
             [
                 _doc(
@@ -400,7 +407,11 @@ class TestADocumentThatNamesItsOwnAddress:
 
         existing = await service.existing_document("kb", "gdrive://file-1/handbook.md")
 
-        assert existing == StoredDocument(document_id="doc-a", content_hash="h")
+        # Its own address, not the one asked for: the sync compares the two
+        # before it trusts a revision.
+        assert existing == StoredDocument(
+            document_id="doc-a", content_hash="h", source_path="handbook.md"
+        )
 
 
 class TestHowManyTimesTheCollectionIsRead:

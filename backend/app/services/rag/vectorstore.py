@@ -151,6 +151,26 @@ class BaseVectorStore(ABC):
         """
 
     @abstractmethod
+    async def restamp_document_revision(
+        self, collection_name: str, document_id: str, revision: str, tenant: UUID | None = None
+    ) -> None:
+        """Write a connector's `revision` onto every chunk of one stored document.
+
+        Used by a connector sync when a file's listed revision changed but its
+        bytes hash to the stored `content_hash` - an object uploaded again with
+        another part size, a file touched. Nothing is embedded again, but without
+        the new revision the next run would download the file again, and every
+        run after it. Every chunk, because the lookup may read any one of them,
+        and only the `revision` key: no other metadata and no row changes.
+
+        Scoped to `tenant` as a delete is, because a document id alone reaches
+        every tenant's rows under it on a shared runtime table (#1684). `None`
+        matches only the untagged, deployment-wide rows. A missing table is a
+        no-op. A database error raises: unlike the lookup, a write that failed is
+        a failure, and the sync counts the file as one.
+        """
+
+    @abstractmethod
     async def get_collection_info(
         self,
         collection_name: str,
@@ -375,6 +395,11 @@ class BaseVectorStore(ABC):
                         "source_path": metadata.get("source_path", ""),
                         "content_hash": metadata.get("content_hash", ""),
                         **(metadata.get("additional_info") or {}),
+                        # After the parser's own keys, not before: a DOCX's core
+                        # properties carry a `revision` counter, and read as the
+                        # connector's revision it would decide whether a file is
+                        # downloaded.
+                        "revision": metadata.get("revision"),
                     },
                     "chunk_count": 0,
                 }
@@ -1034,6 +1059,34 @@ class PgVectorStore(BaseVectorStore):
                     "WHERE knowledge_base_id = :kb_id AND vector_document_id IS NOT NULL)"
                 ),
                 {"kb_id": knowledge_base_id, **org_params},
+            )
+            await session.commit()
+
+    async def restamp_document_revision(
+        self, collection_name: str, document_id: str, revision: str, tenant: UUID | None = None
+    ) -> None:
+        """Set `metadata->>'revision'` on every row of one document, nothing else.
+
+        `||` merges the one key into the existing JSONB, so `content_hash`,
+        `source_path` and the tenant tag the next run matches on are untouched,
+        and a row that has no `revision` key yet gains one. The
+        `CAST` is needed because `jsonb_build_object` takes `"any"`, and asyncpg
+        cannot infer a bound parameter's type from that. The id is sanitized as
+        `delete_document` sanitizes it, and the `_org_filter(tenant)` conjunct
+        confines the write to the rows the caller's tenant stamped (#1684).
+        """
+        if not await self._collection_exists(collection_name):
+            return
+        table = self._table(collection_name)
+        org_clause, org_params = self._org_filter(tenant)
+        async with self.async_session() as session:
+            await session.execute(
+                text(
+                    f"UPDATE {table} SET metadata = metadata || "
+                    "jsonb_build_object('revision', CAST(:revision AS text)) "
+                    f"WHERE parent_doc_id = :doc_id AND {org_clause}"
+                ),
+                {"revision": revision, "doc_id": self._sanitize_id(document_id), **org_params},
             )
             await session.commit()
 

@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "15a149e19257"
 ---
 
 # Dodaj konektor synchronizacji { #add-a-sync-connector }
@@ -119,6 +119,13 @@ korzysta z `previous`.
 |------|---------|------------------|
 | `remote_version(config, credential, previous)` | `None`: każdy przebieg wypisuje listę | Źródło potrafi tanio powiedzieć, w jakim stanie jest cała jego zawartość, na przykład przez commit albo token zmian. Po przebiegu, w którym nic nie zakończyło się błędem, synchronizacja zapisuje tę wartość razem z odciskiem konfiguracji. Następny przebieg, który zastanie tę samą parę, zatrzymuje się przed `list_files()`. Wartość musi się zmienić zawsze, gdy mógł się zmienić którykolwiek wypisany plik albo sama lista. `previous` to wartość, którą ostatni czysty przebieg zapisał przy tej samej konfiguracji, albo `None`. Źródło, które potrafi podać wyłącznie to, co się zmieniło *od* jakiegoś punktu, na przykład delta link z Graph, odpowiada z powrotem `previous`, gdy nic się nie zmieniło. |
 | `aclose()` | nic | Konektor przechowuje coś między `list_files()` a pobraniami, na przykład klon albo sesję. Jest wywoływana po zakończeniu synchronizacji, niezależnie od tego, czy się powiodła. |
+
+`remote_version()` odpowiada za całe źródło. Źródło, które potrafi opisać tylko
+każdy plik z osobna, podaje zamiast tego rewizję każdego z nich, w
+`RemoteFile.revision`: wersję, którą listing nadaje plikowi, na przykład `ETag`
+obiektu. W `new_only` i `update_only` synchronizacja nie pobiera pliku, którego
+rewizja z listingu jest równa zapisanej. Wartość domyślna, `None`, zachowuje
+pobranie i sprawdzenie `content_hash`.
 
 ## Krok po kroku: konektor do Notion { #step-by-step-a-notion-connector }
 
@@ -434,6 +441,7 @@ z których warto kopiować.
 ## Wskazówki { #tips }
 
 - Ustaw `RemoteFile.source_path` na unikalny URI (np. `notion://page_id`) — jest on używany do deduplikacji między synchronizacjami i to jego porównuje usuwanie: dokument, którego `source_path` kompletny listing już nie wymienia, jest usuwany
+- Wypełniaj `RemoteFile.revision` z listingu, nigdy z pobranych bajtów, bo jej celem jest pominięcie pobrania. Jeśli wartość może przeoczyć zmianę, na przykład rozmiar i czas modyfikacji, napisz o tym w docstringu konektora: `new_only` i `update_only` jej ufają, a środkiem zaradczym jest przebieg `full`. `_fetch` zapisuje bajty rewizji z listingu albo zgłasza wyjątek, bo synchronizacja zapisuje tę rewizję razem z nimi. Pominięty plik nigdy nie trafia do `_fetch`. Jeśli `_fetch` odrzuca plik z powodu, który nie zmienia rewizji, na przykład reguły robots.txt, sprawdzaj ten powód także w listingu
 - Zwracaj `complete=False` z listingu, który zatrzymał się przed końcem, i nigdy nie rzucaj wyjątku z takiego, z którego możesz jeszcze częściowo skorzystać
 - Używaj `asyncio.to_thread()`, żeby opakować blokujące wywołania SDK, tak by nie blokowały pętli zdarzeń
 - Zaimplementuj `validate_config()`, żeby odrzucić konfigurację, którą kreator może jeszcze poprawić — `ConfigRefusal` nazywające `field` jest tym, co każe kreatorowi zaznaczyć to wejście, zamiast pokazywać zdanie nad czterema z nich. Metoda ta widzi konfigurację, a nie poświadczenie, więc „czy ten klucz dosięgnie usługi" to pytanie na pierwszą synchronizację, a nie na tę metodę

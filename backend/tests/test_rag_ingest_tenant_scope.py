@@ -423,7 +423,7 @@ class TestPgVectorStoreScopesEveryRowOp:
 class TestARevisionRefreshIsScopedLikeADelete:
     """`restamp_document_revision` writes by document id, which is unique per
     tenant and not across them: on a shared runtime table the id alone reaches
-    another organization's rows under the same id (#1684, #28)."""
+    another organization's rows under the same id (#1684)."""
 
     @staticmethod
     def _store_over(execute: AsyncMock) -> tuple[PgVectorStore, MagicMock]:
