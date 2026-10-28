@@ -1,5 +1,5 @@
 ---
-source_sha: "44ff5be22dbe"
+source_sha: "54fd188fd445"
 ---
 
 # Przetwarzanie plików { #file-processing }
@@ -1140,7 +1140,8 @@ zapisuje rewizję odczytanych bajtów w metadanych wektorowych dokumentu, obok
 `content_hash`. W `new_only` i `update_only` synchronizacja pomija plik przed
 pobraniem, gdy jego rewizja z listingu jest równa zapisanej. Source nadal zgłasza
 roszczenie do pominiętego pliku, więc usuwanie go zostawia. Plik, który zmienia
-się w trakcie pobierania, też jest pomijany, a następna synchronizacja go odczyta.
+się albo zostaje usunięty w trakcie pobierania, też jest pomijany. Następna
+synchronizacja odczyta jego nową wersję albo usunie jego dokument.
 
 Gdy rewizja się zmieniła, a hash nie,
 synchronizacja wpisuje nową rewizję do zapisanego dokumentu i niczego nie
@@ -1150,6 +1151,17 @@ porównuje i zapisuje rewizję tylko dla dokumentu pod adresem z listingu.
 Dokument znaleziony tylko po nazwie, na przykład przesłany plik, zostaje przy
 ścieżce hasha.
 
+Każdy taki zapis zmienia metadane każdego wiersza chunku dokumentu. PostgreSQL nie
+może wykonać go jako aktualizacji HOT, bo indeksy tabeli kolekcji czytają metadane,
+więc każdy wiersz dostaje też nowy wpis w każdym indeksie, także w indeksie
+wektorowym. Zmierzone na indeksie o 1536 wymiarach i 12 000 wierszach kosztuje to od
+2 do 6 ms na wiersz chunku, a na większym indeksie więcej.
+
+Pierwsza synchronizacja po aktualizacji zapisuje rewizję w każdym dokumencie
+zapisanym przed wprowadzeniem rewizji, więc na dużej kolekcji ta synchronizacja trwa
+dłużej. Po niej uruchom `VACUUM (ANALYZE)` na tabeli kolekcji albo pozwól, żeby autovacuum usunął
+stare wersje wierszy.
+
 Rewizja to jedyne miejsce, w którym oba flow mogą dać różne odpowiedzi. Lokalna
 synchronizacja rozpoznaje niezmieniony plik wyłącznie po hashu, a to sprawdzenie
 jest dokładne. Dokładna rewizja, taka jak `ETag` z S3 albo sha bloba w Git, daje
@@ -1157,6 +1169,12 @@ tę samą odpowiedź co hash. Rewizja, która może przeoczyć zmianę, taka jak
 i czas modyfikacji, może sprawić, że `new_only` i `update_only` pominą rzadką
 edycję. Środkiem zaradczym jest `full`: pobiera i wciąga ponownie każdy plik.
 Konektor, którego rewizja może przeoczyć zmianę, pisze o tym w swoim docstringu.
+
+Synchronizacja porównuje rewizję z listingu z rewizją zapisaną pod adresem,
+niezależnie od tego, który source ją zapisał. Dwa source S3 w jednej bazie
+wiedzy, z tą samą nazwą bucketu na dwóch endpointach, wymieniają ten sam adres.
+Rewizja zapisana przez jeden z nich może więc sprawić, że drugi pominie plik,
+którego treść pochodzi od pierwszego. To także naprawia `full`.
 
 **Dwie rzeczy o dopasowywaniu, i obie decydują o tym, czy dokument przeżyje.**
 
@@ -1395,12 +1413,16 @@ celowo blokujące, bo blokujące są wszystkie trzy SDK, a wspólna klasa urucha
 je na wątku roboczym.
 
 Klient podaje `ETag` każdego obiektu w `StoredObject.etag`, a wspólne listowanie
-mapuje go na `RemoteFile.revision`. Pobranie podaje `ETag` odczytanych bajtów.
-Duży obiekt jest czytany w zakresach przypiętych do jednego `ETag`, więc obiekt
-zmieniony między dwoma zakresami jest pomijany i odczytywany przy następnym
-przebiegu. Obiekt zmieniony poza API S3 magazynu, na przykład przez filer lub
-montowanie FUSE w SeaweedFS, może zachować stary `ETag`. Po takiej zmianie
-uruchom `full`.
+mapuje go na `RemoteFile.revision`. Pobranie podaje `ETag` odczytanych bajtów. Duży
+obiekt jest czytany w zakresach przypiętych do jednego `ETag`, więc obiekt zmieniony
+między dwoma zakresami jest pomijany i odczytywany przy następnym przebiegu. Obiekt
+zmieniony poza API S3 magazynu, na przykład przez filer lub montowanie FUSE w
+SeaweedFS, może zachować stary `ETag`. Po takiej zmianie uruchom `full`.
+
+Obiekt usunięty po listingu też jest pomijany, a następny przebieg usuwa jego
+dokument. Odczyt z odpowiedzią 404 liczy się jako usunięcie tylko wtedy, gdy listing
+klucza już go nie wymienia, więc klucz, który magazyn wymienia, ale nie może go
+odczytać, jest błędem.
 
 Trzy rzeczy nie są tanie, a konektor bez nich jest rachunkiem albo
 niespodzianką, a nie funkcją:

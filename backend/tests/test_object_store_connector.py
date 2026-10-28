@@ -267,8 +267,8 @@ class TestTheS3ConnectorStillListsWhatItListed:
 
     async def test_each_objects_etag_is_reported_verbatim_as_its_revision(self):
         """Quotes and the multipart `-<parts>` suffix included. The sync compares
-        one listing with an earlier listing of the same API, so a value kept as
-        S3 sent it cannot drift between two versions of a transformation. A
+        the listed value with one a `GetObject` or `HeadObject` reported, so
+        neither side transforms it and both keep the store's own format. A
         multipart ETag is not an MD5 of the bytes, which does not matter: an
         equal ETag still means unchanged content, and a new one for the same
         bytes costs one download, never a skipped change."""

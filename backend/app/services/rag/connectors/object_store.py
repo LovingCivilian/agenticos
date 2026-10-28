@@ -45,12 +45,13 @@ class StoredObject(BaseModel):
     `etag` is the object's revision: the sync compares it with the one
     stored beside the document and skips the download when they are equal, which
     saves the transfer and not only the embedding. Every object store has one,
-    and it changes whenever the content does. It is not always a hash of the
-    bytes: an S3 multipart upload's `ETag` is the MD5 of its parts' MD5s with a
-    `-<parts>` suffix, and an SSE-KMS or SSE-C object's is no MD5 at all. So the
-    same bytes uploaded again with another part size, or copied, can get a new
-    one. That costs one download, after which the hash finds the content
-    unchanged and the stored revision is refreshed - never a skipped change.
+    and on a store that keeps it current, it changes whenever the content does.
+    It is not always a hash of the bytes: an S3 multipart upload's `ETag` is the
+    MD5 of its parts' MD5s with a `-<parts>` suffix, and an SSE-KMS or SSE-C
+    object's is no MD5 at all. So the same bytes uploaded again with another
+    part size, or copied, can get a new one. That costs one download, after
+    which the hash finds the content unchanged and the stored revision is
+    refreshed - never a skipped change.
     What is stored is the `ETag` `_download` reports for the bytes it read, so
     an object replaced after the listing is filed under its own version. An
     `ETag` is only as exact as the store behind it: an object changed outside

@@ -41,7 +41,7 @@ class _Received:
 
     A subscriber in s3transfer's sense by shape, not by base class, so this
     module does not import s3transfer wherever it is imported (#2225).
-    s3transfer reports each chunk it writes and takes back what a retried range
+    s3transfer reports each chunk it receives and takes back what a retried range
     had sent, so the sum is what arrived - which a range answered with 416, and
     written as nothing, never adds to.
     """
@@ -172,11 +172,13 @@ class S3Connector(ObjectStoreConnector):
         with this loop and stays with it, in the client's own method, because
         which of the two arrives is the client's own vocabulary.
 
-        `ETag` is kept as S3 sends it, double quotes included: the sync compares
-        it with an earlier listing from this same call, so a value left verbatim
-        cannot differ between two versions of a transformation. An
-        S3-compatible store that sends none gives `None`, and that file takes
-        the download and the hash.
+        `ETag` is kept as S3 sends it, double quotes included. The sync compares
+        the listed value with the one a `GetObject` or `HeadObject` reported for
+        an earlier download, so neither side transforms it: the two agree only
+        while both keep the store's own format, which
+        `tests/integration/test_s3_connector.py` checks on each store it runs
+        against. An S3-compatible store that sends none gives `None`, and that
+        file takes the download and the hash.
         """
         client = self._get_s3_client(config, credential)
         params: dict[str, Any] = {"Bucket": container}
@@ -379,11 +381,15 @@ def _gone(client: BaseClient, container: str, key: str) -> bool:
     """Whether a listing no longer names `key`: the evidence that a 404 is a deletion.
 
     A 404 alone is not that evidence. A store or a proxy can answer 404 for a
-    key it lists - a path rewritten on its way in, a key the listing decodes
-    one way and a read another - and taken for a deletion, that file would be
-    skipped on every run while the sync reported success. The key sorts first
-    among the keys it is a prefix of, so a listing of one key answers. A bucket
-    that is gone raises here: that is the source's configuration, not a change.
+    key it lists - a path rewritten on its way in - and taken for a deletion,
+    that file would be skipped on every run while the sync reported success.
+    This asks the same store, so it cannot catch a listing that names a key
+    wrongly - one decoded one way to list and another to read - in the same
+    way on every run. On a bucket that lists in key order, the key sorts first
+    among the keys it is a prefix of, so a listing of one key answers. A
+    directory bucket lists in no order and refuses a prefix that does not end
+    in `/`, so there the listing raises and the file fails. A bucket that is
+    gone raises here too: that is the source's configuration, not a change.
     """
     listed = client.list_objects_v2(Bucket=container, Prefix=key, MaxKeys=1)
     return all(obj.get("Key") != key for obj in listed.get("Contents", []))

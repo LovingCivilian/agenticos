@@ -353,6 +353,11 @@ ignore_names = []
 #     them arriving through a declaration we do control (`fastapi`, the
 #     `pydantic-ai-slim` extras, `boto3`, `logfire`). Declaring each by hand
 #     would double the manifest to restate what those extras already promise.
+#     `s3transfer` arrives through `boto3`, which pins its minor version. The
+#     S3 connector's download relies on its internals - `meta.etag` and
+#     `meta.size`, `IfMatch` on every range, a 416 range written as nothing,
+#     negative progress on a retry - so a boto3 bump that moves s3transfer to
+#     a new minor needs `tests/integration/test_s3_connector.py` on a store.
 #
 # DEP004 (imported, declared dev-only) is the second gate: it found `anyio`,
 # imported at module scope in application code and declared only in the `dev`

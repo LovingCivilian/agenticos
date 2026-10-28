@@ -1072,8 +1072,9 @@ A connector can also report a revision for each file in its listing, in
 revision of the bytes it read in the document's vector metadata, next to
 `content_hash`. In `new_only` and `update_only`, the sync skips a file before the
 download when its listed revision equals the stored one. The source still claims
-the skipped file, so removal keeps it. A file that changes during its download is
-skipped too, and the next sync reads it.
+the skipped file, so removal keeps it. A file that changes or is deleted during
+its download is skipped too. The next sync reads its new version or removes its
+document.
 
 When the revision changed and the hash did not, the sync writes the new
 revision to the stored document and embeds nothing. A document stored with no
@@ -1082,6 +1083,16 @@ as it ignores the hash. The sync compares and records a revision only for a
 document at the listed address. A document found by its name only, such as an
 upload, keeps the hash path.
 
+Each such write changes the metadata of every chunk row of the document. PostgreSQL
+cannot do that as a HOT update, because the indexes of the collection table read the
+metadata, so each row also gets a new entry in every index, the vector index too.
+Measured on a 1536-dimension index of 12,000 rows, that costs 2 to 6 ms for each
+chunk row, and more on a larger index.
+
+The first sync after an upgrade writes a revision to each document stored before
+revisions, so on a large collection that sync is slower. After it, run `VACUUM (ANALYZE)` on the
+collection table, or let autovacuum remove the old row versions.
+
 The revision is the one place where the two flows can give different answers. The
 local sync finds an unchanged file by its hash only, and that check is exact. An
 exact revision, such as an S3 `ETag` or a Git blob sha, gives the same answer as
@@ -1089,6 +1100,12 @@ the hash. A revision that can miss a change, such as a size and a modification
 time, can make `new_only` and `update_only` skip a rare edit. `full` is the
 remedy: it downloads and ingests every file again. A connector whose revision can
 miss a change says so in its docstring.
+
+The sync compares the listed revision with the one stored at the address,
+whichever source stored it. Two S3 sources in one knowledge base, with the same
+bucket name on two endpoints, list the same address. So a revision that one of
+them stored can make the other skip a file whose content came from the first.
+`full` repairs that too.
 
 **Two things about matching, both of which decide whether a document survives.**
 
@@ -1312,12 +1329,16 @@ is that subclass ([#988](https://github.com/vstorm-co/agenticos/issues/988)); it
 two hooks are deliberately blocking, because all three SDKs are, and the shared
 class runs them on a worker thread.
 
-A client reports each object's `ETag` in `StoredObject.etag`, and the shared
-listing maps it to `RemoteFile.revision`. The download reports the `ETag` of the
-bytes it read. A large object is read in ranges pinned to one `ETag`, so an object
-that changes between two ranges is skipped and read on the next run. An object
-changed outside the store's S3 API, for example through a SeaweedFS filer or FUSE
-mount, can keep its old `ETag`. Run `full` after such a change.
+A client reports each object's `ETag` in `StoredObject.etag`, and the shared listing
+maps it to `RemoteFile.revision`. The download reports the `ETag` of the bytes it
+read. A large object is read in ranges pinned to one `ETag`, so an object that
+changes between two ranges is skipped and read on the next run. An object changed
+outside the store's S3 API, for example through a SeaweedFS filer or FUSE mount, can
+keep its old `ETag`. Run `full` after such a change.
+
+An object deleted after the listing is skipped too, and the next run removes its
+document. A read answered with 404 counts as a deletion only when a listing of the
+key no longer names it, so a key that the store lists but cannot read is a failure.
 
 Three things are not cheap, and a connector without them is a bill or a surprise
 rather than a feature:

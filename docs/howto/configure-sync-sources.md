@@ -672,7 +672,7 @@ Every sync creates a `SyncLog` entry with the following fields:
 | `total_files` | Number of files discovered |
 | `ingested` | Successfully ingested (new) |
 | `updated` | Successfully re-ingested (replaced) |
-| `skipped` | Skipped (already present or unchanged) |
+| `skipped` | Skipped: already present or unchanged, new in `update_only`, or changed or deleted during the run and left for the next run |
 | `failed` | Failed to ingest, including pages or files the listing could not read, and documents that could not be removed |
 | `removed` | Removed because the source no longer lists them (see [what a sync removes](#what-a-sync-removes)) |
 | `error_message` | What went wrong, or why nothing was removed. A run can be `done` and still have a message, for example when a crawl stopped at its page limit, or when files changed or were deleted during the run and were left for the next run. Read `status` to know if the run failed |

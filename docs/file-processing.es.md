@@ -1,5 +1,5 @@
 ---
-source_sha: "44ff5be22dbe"
+source_sha: "54fd188fd445"
 ---
 
 # Procesamiento de archivos { #file-processing }
@@ -1156,8 +1156,9 @@ sincronización guarda la revisión de los bytes leídos en los metadatos vector
 del documento, junto a `content_hash`. En `new_only` y `update_only`, la
 sincronización omite un archivo antes de la descarga cuando su revisión listada es
 igual a la guardada. La fuente sigue reclamando el archivo omitido, así que la
-eliminación lo conserva. Un archivo que cambia durante su descarga también se
-omite, y la siguiente sincronización lo lee.
+eliminación lo conserva. Un archivo que cambia o se elimina durante su
+descarga también se omite. La siguiente sincronización lee su nueva versión o
+elimina su documento.
 
 Cuando la
 revisión ha cambiado y el hash no, la sincronización escribe la nueva revisión en
@@ -1167,6 +1168,18 @@ igual que ignora el hash. La sincronización compara y guarda una revisión solo
 para un documento en la dirección del listado. Un documento encontrado solo por
 su nombre, como una subida, sigue el camino del hash.
 
+Cada escritura así cambia los metadatos de cada fila de chunk del documento.
+PostgreSQL no puede hacerla como una actualización HOT, porque los índices de la
+tabla de la colección leen los metadatos, así que cada fila recibe también una
+entrada nueva en cada índice, incluido el índice vectorial. Medido en un índice de
+1536 dimensiones y 12 000 filas, eso cuesta de 2 a 6 ms por fila de chunk, y más en
+un índice más grande.
+
+La primera sincronización tras una actualización escribe una revisión en cada
+documento guardado antes de las revisiones, así que en una colección grande esa
+sincronización es más lenta. Después, ejecuta `VACUUM (ANALYZE)` en la tabla de la colección, o deja
+que autovacuum elimine las versiones antiguas de las filas.
+
 La revisión es el único punto en el que los dos flows pueden dar respuestas
 distintas. La sincronización local reconoce un archivo sin cambios solo por su
 hash, y esa comprobación es exacta. Una revisión exacta, como un `ETag` de S3 o un
@@ -1175,6 +1188,12 @@ pasar por alto un cambio, como un tamaño y una hora de modificación, puede hac
 que `new_only` y `update_only` omitan una edición poco frecuente. `full` es el
 remedio: descarga e ingiere de nuevo cada archivo. Un conector cuya revisión puede
 pasar por alto un cambio lo dice en su docstring.
+
+La sincronización compara la revisión listada con la guardada en la dirección,
+sea cual sea la fuente que la guardó. Dos fuentes S3 en una base de conocimiento,
+con el mismo nombre de bucket en dos endpoints, listan la misma dirección. Así que
+una revisión que guardó una de ellas puede hacer que la otra omita un archivo cuyo
+contenido vino de la primera. `full` también lo repara.
 
 **Dos cosas sobre el emparejado, y las dos deciden si un documento sobrevive.**
 
@@ -1417,12 +1436,17 @@ bloqueantes a propósito, porque los tres SDK lo son, y la clase compartida los
 ejecuta en un hilo de worker.
 
 Un cliente informa del `ETag` de cada objeto en `StoredObject.etag`, y el listado
-compartido lo asigna a `RemoteFile.revision`. La descarga informa del `ETag` de
-los bytes leídos. Un objeto grande se lee en rangos fijados a un solo `ETag`, así
-que un objeto que cambia entre dos rangos se omite y se lee en la siguiente
-ejecución. Un objeto cambiado fuera de la API S3 del almacén, por ejemplo con un
-filer o un montaje FUSE de SeaweedFS, puede conservar su `ETag` antiguo. Ejecuta
-`full` después de un cambio así.
+compartido lo asigna a `RemoteFile.revision`. La descarga informa del `ETag` de los
+bytes leídos. Un objeto grande se lee en rangos fijados a un solo `ETag`, así que un
+objeto que cambia entre dos rangos se omite y se lee en la siguiente ejecución. Un
+objeto cambiado fuera de la API S3 del almacén, por ejemplo con un filer o un
+montaje FUSE de SeaweedFS, puede conservar su `ETag` antiguo. Ejecuta `full` después
+de un cambio así.
+
+Un objeto eliminado después del listado también se omite, y la siguiente ejecución
+elimina su documento. Una lectura respondida con 404 cuenta como eliminación solo
+cuando un listado de la clave ya no la nombra, así que una clave que el almacén
+lista pero no puede leer es un fallo.
 
 Hay tres cosas que no son baratas, y un conector sin ellas es una factura o una
 sorpresa en vez de una funcionalidad:

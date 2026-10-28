@@ -1,5 +1,5 @@
 ---
-source_sha: "44ff5be22dbe"
+source_sha: "54fd188fd445"
 ---
 
 # Dateiverarbeitung { #file-processing }
@@ -1209,8 +1209,8 @@ Vektor-Metadaten des Dokuments, neben `content_hash`. In `new_only` und
 `update_only` überspringt der Sync eine Datei vor dem Download, wenn ihre
 aufgelistete Revision der gespeicherten gleicht. Die Source beansprucht die
 übersprungene Datei weiterhin, das Entfernen behält sie also. Eine Datei, die sich
-während ihres Downloads ändert, wird ebenfalls übersprungen, und der nächste Sync
-liest sie.
+während ihres Downloads ändert oder gelöscht wird, wird ebenfalls übersprungen.
+Der nächste Sync liest ihre neue Version oder entfernt ihr Dokument.
 
 Hat sich die Revision geändert und der Hash nicht, schreibt der Sync die
 neue Revision in das gespeicherte Dokument und bettet nichts ein. Ein ohne
@@ -1220,6 +1220,18 @@ speichert eine Revision nur für ein Dokument unter der aufgelisteten Adresse.
 Ein Dokument, das nur über seinen Namen gefunden wird, etwa ein Upload, bleibt
 beim Hash-Weg.
 
+Jeder solche Schreibvorgang ändert die Metadaten jeder Chunk-Zeile des Dokuments.
+PostgreSQL kann ihn nicht als HOT-Update ausführen, weil die Indizes der
+Collection-Tabelle die Metadaten lesen. Jede Zeile bekommt daher auch einen neuen
+Eintrag in jedem Index, auch im Vektorindex. Gemessen an einem Index mit 1536
+Dimensionen und 12.000 Zeilen kostet das 2 bis 6 ms pro Chunk-Zeile, bei einem
+größeren Index mehr.
+
+Der erste Sync nach einem Upgrade schreibt eine Revision in jedes Dokument, das vor
+den Revisionen gespeichert wurde, deshalb dauert dieser Sync bei einer großen
+Collection länger. Führen Sie danach `VACUUM (ANALYZE)` auf der Collection-Tabelle aus, oder lassen
+Sie Autovacuum die alten Zeilenversionen entfernen.
+
 Die Revision ist die einzige Stelle, an der die beiden Flows verschiedene
 Antworten geben können. Der lokale Sync erkennt eine unveränderte Datei nur an
 ihrem Hash, und diese Prüfung ist exakt. Eine exakte Revision, etwa ein S3-`ETag`
@@ -1228,6 +1240,13 @@ eine Änderung übersehen kann, etwa Größe und Änderungszeit, kann `new_only`
 `update_only` eine seltene Bearbeitung überspringen lassen. `full` ist die
 Abhilfe: Es lädt jede Datei herunter und liest sie neu ein. Ein Connector, dessen
 Revision eine Änderung übersehen kann, sagt das in seinem Docstring.
+
+Der Sync vergleicht die aufgelistete Revision mit der unter der Adresse
+gespeicherten, egal welche Source sie gespeichert hat. Zwei S3-Sources in einer
+Wissensdatenbank, mit demselben Bucket-Namen an zwei Endpunkten, listen dieselbe
+Adresse. Eine Revision, die eine von ihnen gespeichert hat, kann die andere daher
+eine Datei überspringen lassen, deren Inhalt von der ersten stammt. Auch das
+behebt `full`.
 
 **Zwei Dinge zum Abgleich, und beide entscheiden, ob ein Dokument überlebt.**
 
@@ -1483,12 +1502,17 @@ führt sie auf einem Worker-Thread aus.
 
 Ein Client meldet das `ETag` jedes Objekts in `StoredObject.etag`, und die
 gemeinsame Auflistung bildet es auf `RemoteFile.revision` ab. Der Download meldet
-das `ETag` der gelesenen Bytes. Ein großes Objekt wird in Bereichen gelesen, die
-an ein `ETag` gebunden sind. Ein Objekt, das sich zwischen zwei Bereichen ändert,
-wird daher übersprungen und beim nächsten Lauf gelesen. Ein Objekt, das außerhalb
-der S3-API des Speichers geändert wird, etwa über einen SeaweedFS-Filer oder einen
-FUSE-Mount, kann sein altes `ETag` behalten. Führen Sie nach einer solchen
-Änderung `full` aus.
+das `ETag` der gelesenen Bytes. Ein großes Objekt wird in Bereichen gelesen, die an
+ein `ETag` gebunden sind. Ein Objekt, das sich zwischen zwei Bereichen ändert, wird
+daher übersprungen und beim nächsten Lauf gelesen. Ein Objekt, das außerhalb der
+S3-API des Speichers geändert wird, etwa über einen SeaweedFS-Filer oder einen
+FUSE-Mount, kann sein altes `ETag` behalten. Führen Sie nach einer solchen Änderung
+`full` aus.
+
+Ein Objekt, das nach der Auflistung gelöscht wird, wird ebenfalls übersprungen, und
+der nächste Lauf entfernt sein Dokument. Ein mit 404 beantworteter Lesevorgang zählt
+nur dann als Löschung, wenn eine Auflistung des Schlüssels ihn nicht mehr nennt. Ein
+Schlüssel, den der Speicher auflistet, aber nicht lesen kann, ist daher ein Fehler.
 
 Drei Dinge sind nicht günstig, und ein Connector ohne sie ist eine Rechnung oder
 eine Überraschung statt einer Funktion:

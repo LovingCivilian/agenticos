@@ -1,5 +1,5 @@
 ---
-source_sha: "81e32d2f385c"
+source_sha: "46235edd79a2"
 ---
 
 # Añade un sync connector { #add-a-sync-connector }
@@ -440,10 +440,12 @@ los connectors que vienen incluidos (`GoogleDriveConfig`, `S3Config`,
 ## Consejos { #tips }
 
 - Pon en `RemoteFile.source_path` un URI único (por ejemplo, `notion://page_id`) — sirve para deduplicar entre syncs, y es lo que compara la eliminación: un documento cuyo `source_path` ya no nombra un listado completo se elimina
-- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio. `_fetch` devuelve la revisión de los bytes que escribió, o `None`, porque la sincronización guarda esa. Lanza `ChangedSinceListing` solo cuando el origen muestra que el archivo cambió o desapareció durante la descarga, como una versión nueva, o un listado que ya no nombra el archivo. Nunca la lances solo porque una lectura falló: una lectura que falla en cada ejecución se saltaría entonces en cada ejecución. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
+- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio
+- `_fetch` devuelve la revisión de los bytes que escribió, o `None`, porque la sincronización guarda esa. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
+- Lanza `ChangedSinceListing` solo cuando el origen muestra que el archivo cambió o desapareció durante la descarga, como una versión nueva, o un listado que ya no nombra el archivo. Nunca la lances solo porque una lectura falló: una lectura que falla en cada ejecución se saltaría entonces en cada ejecución. La prueba viene del mismo origen, así que un origen cuyo listado y lecturas no coinciden de la misma forma en cada ejecución sigue haciendo que el archivo se salte en cada ejecución
 - Devuelve `complete=False` desde un listado que se quedó corto, y nunca lances una excepción por uno que todavía puedes usar en parte
 - Envuelve con `asyncio.to_thread()` las llamadas bloqueantes de un SDK para que no bloqueen el event loop
 - Implementa `validate_config()` para rechazar una configuración que el asistente todavía puede arreglar — una `ConfigRefusal` que nombra un `field` es lo que hace que marque ese campo de entrada en lugar de mostrar una frase sobre cuatro de ellos. Ve la configuración y no la credencial, así que "puede esta clave llegar al servicio" es una pregunta para el primer sync, no para este método
 - Declara `SECRET_KIND` y lee la credencial del argumento `credential`. Una credencial no va nunca en `CONFIG_MODEL`, y no hay ningún recurso de reserva a escala de deployment al que recurrir
 - Los ajustes de `app/core/config.py` y `.env` son para valores que no nombran a ningún principal — dónde está un almacén, no quién pregunta (`S3_RAG_ENDPOINT` es la forma)
-- `_fetch()` escribe en el `dest_path` que se le entrega y no devuelve nada — la clase base responde dónde está eso, y el pipeline de ingesta se encarga de todo lo demás
+- `_fetch()` escribe en el `dest_path` que se le entrega y devuelve la revisión de esos bytes, o `None` — la clase base responde dónde está eso, y el pipeline de ingesta se encarga de todo lo demás
