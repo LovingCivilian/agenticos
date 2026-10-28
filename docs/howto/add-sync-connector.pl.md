@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "46235edd79a2"
 ---
 
 # Dodaj konektor synchronizacji { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -46,7 +46,7 @@ flowchart TD
    zadanie)
 3. Ten, kto uruchamia synchronizację, odpieczętowuje ten sekret i podaje go
    dalej; `list_files()` konektora zwraca `RemoteListing`
-4. Dla każdego pliku `BaseSyncConnector.download_file()` decyduje, gdzie może on
+4. Dla każdego pliku `BaseSyncConnector.fetch_file()` decyduje, gdzie może on
    wylądować, i woła `_fetch()` konektora, żeby go tam zapisać
 5. Pipeline ingestii parsuje, dzieli na chunki, embeduje i zapisuje każdy plik
 6. Jeśli listing był kompletny, dokumenty, które to źródło wprowadziło wcześniej,
@@ -62,7 +62,7 @@ flowchart TD
     które dostajesz, i do niczego innego** — konektor wybierający własną ścieżkę
     byłby jedną odmową na konektor do zapamiętania.
 
-`download_file()` jest konkretne i nie jest nadpisywane. Rozwiązuje
+`fetch_file()` jest konkretne i nie jest nadpisywane. Rozwiązuje
 `RemoteFile.name` względem katalogu synchronizacji i potwierdza zawieranie się
 w nim, zanim zostanie zapisany choć jeden bajt, a potem podaje `_fetch()`
 `dest_path`, do którego ma pisać.
@@ -119,6 +119,14 @@ korzysta z `previous`.
 |------|---------|------------------|
 | `remote_version(config, credential, previous)` | `None`: każdy przebieg wypisuje listę | Źródło potrafi tanio powiedzieć, w jakim stanie jest cała jego zawartość, na przykład przez commit albo token zmian. Po przebiegu, w którym nic nie zakończyło się błędem, synchronizacja zapisuje tę wartość razem z odciskiem konfiguracji. Następny przebieg, który zastanie tę samą parę, zatrzymuje się przed `list_files()`. Wartość musi się zmienić zawsze, gdy mógł się zmienić którykolwiek wypisany plik albo sama lista. `previous` to wartość, którą ostatni czysty przebieg zapisał przy tej samej konfiguracji, albo `None`. Źródło, które potrafi podać wyłącznie to, co się zmieniło *od* jakiegoś punktu, na przykład delta link z Graph, odpowiada z powrotem `previous`, gdy nic się nie zmieniło. |
 | `aclose()` | nic | Konektor przechowuje coś między `list_files()` a pobraniami, na przykład klon albo sesję. Jest wywoływana po zakończeniu synchronizacji, niezależnie od tego, czy się powiodła. |
+
+`remote_version()` odpowiada za całe źródło. Źródło, które potrafi opisać tylko
+każdy plik z osobna, podaje zamiast tego rewizję każdego z nich, w
+`RemoteFile.revision`: wersję, którą listing nadaje plikowi, na przykład `ETag`
+obiektu. W `new_only` i `update_only` synchronizacja nie pobiera pliku, którego
+rewizja z listingu jest równa zapisanej. `_fetch` zwraca rewizję zapisanych
+bajtów, a synchronizacja zapisuje właśnie ją. Wartość domyślna, `None`, zachowuje
+pobranie i sprawdzenie `content_hash`.
 
 ## Krok po kroku: konektor do Notion { #step-by-step-a-notion-connector }
 
@@ -434,9 +442,12 @@ z których warto kopiować.
 ## Wskazówki { #tips }
 
 - Ustaw `RemoteFile.source_path` na unikalny URI (np. `notion://page_id`) — jest on używany do deduplikacji między synchronizacjami i to jego porównuje usuwanie: dokument, którego `source_path` kompletny listing już nie wymienia, jest usuwany
+- Wypełniaj `RemoteFile.revision` z listingu, nigdy z pobranych bajtów, bo jej celem jest pominięcie pobrania. Jeśli wartość może przeoczyć zmianę, na przykład rozmiar i czas modyfikacji, napisz o tym w docstringu konektora: `new_only` i `update_only` jej ufają, a środkiem zaradczym jest przebieg `full`
+- `_fetch` zwraca rewizję zapisanych bajtów albo `None`, bo synchronizacja zapisuje właśnie ją. Pominięty plik nigdy nie trafia do `_fetch`. Jeśli `_fetch` odrzuca plik z powodu, który nie zmienia rewizji, na przykład reguły robots.txt, sprawdzaj ten powód także w listingu
+- Zgłoś `ChangedSinceListing` tylko wtedy, gdy źródło pokazuje, że plik zmienił się albo zniknął w trakcie pobierania, na przykład nowa wersja albo listing, który nie wymienia już pliku. Nigdy nie zgłaszaj go tylko z powodu nieudanego odczytu: odczyt, który zawodzi w każdym przebiegu, byłby wtedy pomijany w każdym przebiegu. Dowód pochodzi z tego samego źródła, więc źródło, którego listing i odczyty nie zgadzają się w ten sam sposób w każdym przebiegu, nadal sprawia, że plik jest pomijany w każdym przebiegu
 - Zwracaj `complete=False` z listingu, który zatrzymał się przed końcem, i nigdy nie rzucaj wyjątku z takiego, z którego możesz jeszcze częściowo skorzystać
 - Używaj `asyncio.to_thread()`, żeby opakować blokujące wywołania SDK, tak by nie blokowały pętli zdarzeń
 - Zaimplementuj `validate_config()`, żeby odrzucić konfigurację, którą kreator może jeszcze poprawić — `ConfigRefusal` nazywające `field` jest tym, co każe kreatorowi zaznaczyć to wejście, zamiast pokazywać zdanie nad czterema z nich. Metoda ta widzi konfigurację, a nie poświadczenie, więc „czy ten klucz dosięgnie usługi" to pytanie na pierwszą synchronizację, a nie na tę metodę
 - Zadeklaruj `SECRET_KIND` i czytaj poświadczenie z argumentu `credential`. Poświadczenie nigdy nie trafia do `CONFIG_MODEL` i nie ma żadnego mechanizmu zapasowego na poziomie wdrożenia, na który można by spaść
 - Ustawienia w `app/core/config.py` i `.env` są dla wartości, które nie nazywają żadnego podmiotu — gdzie jest magazyn, a nie kto pyta (`S3_RAG_ENDPOINT` jest tym kształtem)
-- `_fetch()` pisze do `dest_path`, które dostaje, i nic nie zwraca — klasa bazowa odpowiada na pytanie, gdzie to jest, a pipeline ingestii zajmuje się wszystkim dalej
+- `_fetch()` pisze do `dest_path`, które dostaje, i zwraca rewizję tych bajtów albo `None` — klasa bazowa odpowiada na pytanie, gdzie to jest, a pipeline ingestii zajmuje się wszystkim dalej

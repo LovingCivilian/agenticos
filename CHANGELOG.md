@@ -19,6 +19,32 @@ Two things are versioned separately from this file and worth knowing about:
 
 ## [Unreleased]
 
+### Added
+
+- A connector sync in `new_only` and `update_only` no longer downloads a file
+  whose remote revision is unchanged. The S3 connector reports each object's
+  `ETag` as its revision, and the sync stores the `ETag` of the bytes it
+  downloaded. A file that changes or is deleted during its download is skipped,
+  and the next sync reads its new version or removes its document. `full` still
+  downloads every file. The first sync after the upgrade downloads each file one
+  more time, to store its revision. It also rewrites the metadata of every chunk
+  of each unchanged document once, so it is slower on a large collection. Run
+  `VACUUM (ANALYZE)` on the collection tables after it.
+
+### Changed
+
+- For connector authors: `BaseSyncConnector.download_file()` is now
+  `fetch_file()`, which returns the path and the revision of the bytes it
+  fetched. `_fetch` returns that revision, or `None`. An object store's
+  `_download` takes the listed `size` as a keyword and returns the `ETag` of the
+  bytes it read.
+
+### Fixed
+
+- The sync log in the console showed the message of a `done` run in red, as if
+  the run had failed, for example when a crawl stopped at its page limit. A note
+  is now muted text, and only a run with status `error` shows its message in red.
+
 ## [1.27.0] - 2026-10-27
 
 ### Added

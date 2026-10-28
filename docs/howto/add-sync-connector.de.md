@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "46235edd79a2"
 ---
 
 # Einen Sync-Connector hinzufügen { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -46,7 +46,7 @@ flowchart TD
    Aufgabe)
 3. Wer den Sync ausführt, entsiegelt dieses Secret und reicht es hinein; das
    `list_files()` des Connectors gibt ein `RemoteListing` zurück
-4. Für jede Datei entscheidet `BaseSyncConnector.download_file()`, wo sie landen
+4. Für jede Datei entscheidet `BaseSyncConnector.fetch_file()`, wo sie landen
    darf, und ruft das `_fetch()` des Connectors auf, um sie dort zu schreiben
 5. Die Ingestion-Pipeline parst, zerteilt, bettet ein und speichert jede Datei
 6. War die Auflistung vollständig, werden die Dokumente, die diese Source früher
@@ -64,7 +64,7 @@ flowchart TD
     der seinen eigenen Pfad wählte, wäre eine Ablehnung pro Connector, an die man
     denken müsste.
 
-`download_file()` ist konkret und wird nicht überschrieben. Es löst
+`fetch_file()` ist konkret und wird nicht überschrieben. Es löst
 `RemoteFile.name` gegen das Sync-Verzeichnis auf und bestätigt die Enthaltenheit,
 bevor ein einziges Byte geschrieben wird, und reicht `_fetch()` dann einen
 `dest_path` zum Schreiben.
@@ -122,6 +122,14 @@ beantworten kann, die sie stellt. `GitConnector` in
 |------|---------|---------------------|
 | `remote_version(config, credential, previous)` | `None`: jeder Lauf listet auf | Die Quelle kann günstig sagen, auf welchem Stand ihr gesamter Inhalt ist, etwa ein Commit oder ein Change-Token. Nach einem Lauf ohne fehlgeschlagene Datei speichert der Sync den Wert zusammen mit einem Fingerabdruck der Konfiguration. Der nächste Lauf, der dasselbe Paar vorfindet, hält vor `list_files()` an. Der Wert muss sich ändern, sobald sich eine aufgelistete Datei oder die Auflistung selbst geändert haben könnte. `previous` ist der Wert, den der letzte saubere Lauf unter derselben Konfiguration gespeichert hat, oder `None`. Eine Quelle, die nur melden kann, was sich *seit* einem Punkt geändert hat, etwa ein Graph-Delta-Link, antwortet mit `previous`, wenn sich nichts geändert hat. |
 | `aclose()` | nichts | Der Connector hält zwischen `list_files()` und den Downloads etwas vor, etwa einen Klon oder eine Session. Es wird aufgerufen, sobald der Sync vorbei ist, ob er erfolgreich war oder nicht. |
+
+`remote_version()` antwortet für die ganze Quelle. Eine Quelle, die nur jede
+Datei einzeln beschreiben kann, meldet stattdessen für jede eine Revision, in
+`RemoteFile.revision`: die Version, die die Auflistung der Datei gibt, etwa das
+`ETag` eines Objekts. In `new_only` und `update_only` lädt der Sync keine Datei
+herunter, deren aufgelistete Revision der gespeicherten gleicht. `_fetch` gibt
+die Revision der geschriebenen Bytes zurück, und der Sync speichert genau diese.
+Die Vorgabe, `None`, behält den Download und die Prüfung von `content_hash`.
 
 ## Schritt für Schritt: ein Notion-Connector { #step-by-step-a-notion-connector }
 
@@ -441,9 +449,12 @@ Modelle zum Abschauen.
 ## Hinweise { #tips }
 
 - Setzen Sie `RemoteFile.source_path` auf einen eindeutigen URI (zum Beispiel `notion://page_id`) — er dient der Deduplizierung über Syncs hinweg, und er ist das, was das Entfernen vergleicht: Ein Dokument, dessen `source_path` eine vollständige Auflistung nicht mehr nennt, wird entfernt
+- Füllen Sie `RemoteFile.revision` aus der Auflistung, nie aus den heruntergeladenen Bytes, denn ihr Zweck ist, den Download zu sparen. Kann der Wert eine Änderung übersehen, etwa Größe und Änderungszeit, sagen Sie das im Docstring des Connectors: `new_only` und `update_only` vertrauen ihm, und ein `full`-Lauf ist die Abhilfe
+- `_fetch` gibt die Revision der geschriebenen Bytes zurück, oder `None`, denn der Sync speichert genau diese. Eine übersprungene Datei erreicht `_fetch` nie. Lehnt `_fetch` eine Datei aus einem Grund ab, der die Revision nicht ändert, etwa wegen einer robots.txt-Regel, prüfen Sie diesen Grund auch in der Auflistung
+- Lösen Sie `ChangedSinceListing` nur aus, wenn die Quelle zeigt, dass sich die Datei während des Downloads geändert hat oder verschwunden ist, etwa eine neue Version oder eine Auflistung, die die Datei nicht mehr nennt. Lösen Sie sie nie nur wegen eines fehlgeschlagenen Lesevorgangs aus: Ein Lesevorgang, der bei jedem Lauf fehlschlägt, würde dann bei jedem Lauf übersprungen. Der Nachweis kommt von derselben Quelle. Eine Quelle, deren Auflistung und Lesevorgänge bei jedem Lauf auf dieselbe Weise nicht übereinstimmen, lässt die Datei daher weiterhin bei jedem Lauf überspringen
 - Geben Sie `complete=False` aus einer Auflistung zurück, die vorzeitig angehalten hat, und werfen Sie nie eine Exception für eine, die Sie noch teilweise nutzen können
 - Umschließen Sie blockierende SDK-Aufrufe mit `asyncio.to_thread()`, damit sie den Event Loop nicht blockieren
 - Implementieren Sie `validate_config()`, um eine Konfiguration abzulehnen, die der Assistent noch beheben kann — eine `ConfigRefusal`, die ein `field` benennt, ist das, was ihn dieses Eingabefeld markieren lässt, statt einen Satz über vier davon zu zeigen. Sie sieht die Konfiguration und nicht die Zugangsdaten, also ist "kann dieser Key den Dienst erreichen" eine Frage für den ersten Sync und nicht für diese Methode
 - Deklarieren Sie `SECRET_KIND` und lesen Sie die Zugangsdaten aus dem Argument `credential`. Zugangsdaten gehören nie in `CONFIG_MODEL`, und es gibt keinen deploymentweiten Rückfallweg, auf den zurückgefallen werden könnte
 - Einstellungen in `app/core/config.py` und `.env` sind für Werte, die kein Prinzipal benennen — wo ein Speicher liegt, nicht wer fragt (`S3_RAG_ENDPOINT` ist die Form)
-- `_fetch()` schreibt in den `dest_path`, den es bekommt, und gibt nichts zurück — die Basisklasse beantwortet, wo der liegt, und die Ingestion-Pipeline übernimmt alles Weitere
+- `_fetch()` schreibt in den `dest_path`, den es bekommt, und gibt die Revision dieser Bytes zurück, oder `None` — die Basisklasse beantwortet, wo der liegt, und die Ingestion-Pipeline übernimmt alles Weitere

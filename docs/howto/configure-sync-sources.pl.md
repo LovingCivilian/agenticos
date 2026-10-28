@@ -1,5 +1,5 @@
 ---
-source_sha: "593e85034342"
+source_sha: "3fe463db0444"
 ---
 
 # Konfiguracja źródeł synchronizacji { #configure-sync-sources }
@@ -146,9 +146,9 @@ w interfejsie, zrobisz też przez `curl` lub dowolnego klienta HTTP.
 
 | Tryb | Zachowanie |
 |------|----------|
-| `full` | Synchronizuje wszystko od nowa. Wszystkie pliki są (ponownie) przetwarzane, istniejące dokumenty zastępowane. |
-| `new_only` | Dodaje nowe pliki i aktualizuje zmienione. Zmiany wykrywa po skrócie SHA-256 — pliki bez zmian są pomijane. |
-| `update_only` | Aktualizuje wyłącznie pliki już obecne w kolekcji. Nowe pliki są pomijane. Skrót SHA-256 pomija pliki bez zmian. |
+| `full` | Synchronizuje wszystko od nowa. Wszystkie pliki są (ponownie) przetwarzane, istniejące dokumenty zastępowane. Ignoruje rewizje i skróty, więc uruchom go, gdy rewizja Connectora może przeoczyć zmianę. |
+| `new_only` | Dodaje nowe pliki i aktualizuje zmienione. Zmiany wykrywa po rewizji Connectora, a potem po skrócie SHA-256 — pliki bez zmian są pomijane. |
+| `update_only` | Aktualizuje wyłącznie pliki już obecne w kolekcji. Nowe pliki są pomijane. Rewizja Connectora, a potem skrót SHA-256, pomijają pliki bez zmian. |
 
 !!! tip "`new_only` do większości zastosowań"
 
@@ -186,9 +186,12 @@ znowu go nie wymieni.
 
 Każda synchronizacja po pierwszej robi tak mało, jak pozwala na to źródło:
 
-- **Niezmieniony plik kosztuje pobranie, nie embedowanie.** Jego SHA-256 zgadza
-  się ze skrótem zapisanego dokumentu, więc jest liczony jako `skipped` i nigdy
-  nie jest ponownie parsowany ani embedowany.
+- **Niezmieniony plik kosztuje najwyżej pobranie, nigdy embedowanie.** Jego
+  SHA-256 zgadza się ze skrótem zapisanego dokumentu, więc jest liczony jako
+  `skipped` i nigdy nie jest ponownie parsowany ani embedowany. Connector, który
+  podaje rewizję każdego pliku, oszczędza także pobranie. S3 podaje `ETag` każdego
+  obiektu, więc `new_only` i `update_only` pomijają obiekt z niezmienionym `ETag`
+  przed pobraniem. `full` pobiera każdy plik.
 - **Niezmienione źródło kosztuje jedno zapytanie.** Connector, który potrafi
   powiedzieć, w jakim stanie jest cała jego zawartość — w przypadku gałęzi Git
   jest to jej commit na czubku (head), a w przypadku biblioteki SharePoint jej
@@ -699,10 +702,10 @@ Każda synchronizacja tworzy wpis `SyncLog` z następującymi polami:
 | `total_files` | Liczba znalezionych plików |
 | `ingested` | Poprawnie przetworzone (nowe) |
 | `updated` | Poprawnie przetworzone ponownie (zastąpione) |
-| `skipped` | Pominięte (już obecne lub bez zmian) |
+| `skipped` | Pominięte: już obecne lub bez zmian, nowe w `update_only` albo zmienione lub usunięte w trakcie przebiegu i zostawione następnemu przebiegowi |
 | `failed` | Nieudane przetworzenie, łącznie ze stronami lub plikami, których lista nie zdołała odczytać, oraz dokumentami, których nie udało się usunąć |
 | `removed` | Usunięte, bo źródło już ich nie wypisuje (zobacz [co usuwa synchronizacja](#what-a-sync-removes)) |
-| `error_message` | Co poszło nie tak albo dlaczego nic nie usunięto. Przebieg może mieć status `done` i mimo to komunikat, na przykład gdy crawl zatrzymał się na limicie stron |
+| `error_message` | Co poszło nie tak albo dlaczego nic nie usunięto. Przebieg może mieć status `done` i mimo to komunikat, na przykład gdy crawl zatrzymał się na limicie stron albo gdy pliki zmieniły się lub zostały usunięte w trakcie przebiegu i czekają na następny przebieg. To, czy przebieg się nie powiódł, mówi `status` |
 | `started_at` | Kiedy synchronizacja się zaczęła |
 | `completed_at` | Kiedy synchronizacja się skończyła |
 

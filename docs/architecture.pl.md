@@ -1,5 +1,5 @@
 ---
-source_sha: "4cea402448d3"
+source_sha: "052a2707e57f"
 ---
 
 # Architektura { #architecture }
@@ -125,7 +125,7 @@ importowany jako typ, a nie jako dostęp do danych.
 
 ### Konektory RAG (`rag/connectors/`) { #rag-connectors-ragconnectors }
 - Wymienne adaptery synchronizacji implementujące `BaseSyncConnector`
-- Każdy konektor dostarcza `list_files()` i `download_file()`
+- Każdy konektor dostarcza `list_files()` i `fetch_file()`
 - Rejestrowane w `CONNECTOR_REGISTRY`, żeby dało się je znaleźć w czasie działania
 
 ## Transakcja żądania { #the-requests-transaction }
@@ -953,7 +953,7 @@ Zdalne źródła dokumentów korzystają z wymiennych konektorów w
 z `list_files()` i `_fetch()`, deklaruje `SECRET_KIND` nazywające sekret
 w vaulcie, który go uwierzytelnia, oraz deklaruje `CONFIG_MODEL` — model
 Pydantic mówiący, jak znaleźć dokumenty, publikowany do kreatora jako JSON
-Schema. `download_file()` jest
+Schema. `fetch_file()` jest
 konkretne i decyduje, gdzie plik może wylądować. Zobacz `docs/patterns.md`, żeby
 dowiedzieć się, jak dodać konektor, a `docs/howto/add-sync-connector.md` po
 opracowany przykład.

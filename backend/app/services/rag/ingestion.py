@@ -34,15 +34,25 @@ class _CollectionRemoved(Exception):
 class StoredDocument:
     """What a collection already holds for the file being ingested.
 
-    Both fields or neither: they are facts about one document, and returning
-    them together is what stops a caller pairing one document's id with
-    another's hash (#548). Absent means no match, not an empty document - a
-    stored hash of `""` is reported as `None` for the same reason every caller
-    gates on truthiness.
+    Facts about one document: returning them together is what stops a caller
+    pairing one document's id with another's hash (#548), or comparing a listed
+    revision against another document's and skipping the download on the
+    strength of the wrong file. The id and the hash come together or not at
+    all. Absent means no match, not an empty document - a stored hash of `""`
+    is reported as `None` for the same reason every caller gates on truthiness.
+
+    `source_path` is the stored document's own address. It is not the one asked
+    for when the match was by name: an upload stores its filename there. A
+    connector's `revision` speaks for one address, so a caller compares it only
+    when the two addresses agree. `revision` is `None` for a document stored
+    before the sync kept revisions, by an upload or a local sync, or by a
+    connector that reports none.
     """
 
     document_id: str | None = None
     content_hash: str | None = None
+    source_path: str | None = None
+    revision: str | None = None
 
 
 def _stored(doc: DocumentInfo) -> StoredDocument:
@@ -50,6 +60,8 @@ def _stored(doc: DocumentInfo) -> StoredDocument:
     return StoredDocument(
         document_id=doc.document_id,
         content_hash=meta.get("content_hash") or None,
+        source_path=meta.get("source_path") or None,
+        revision=meta.get("revision") or None,
     )
 
 
@@ -124,6 +136,20 @@ class IngestionService:
             collection_name, source_path=source_path, tenant=self._tenant
         )
 
+    async def restamp_revision(
+        self, collection_name: str, document_id: str, revision: str, source_path: str
+    ) -> None:
+        """Record a connector's new `revision` on the document at `source_path`, in this tenant.
+
+        For a file whose revision changed while its bytes did not, so the next
+        sync skips its download. Unlike `existing_document`, a store that
+        refuses the write raises: the sync counts the file as failed rather than
+        reporting a skip that recorded nothing.
+        """
+        await self.store.restamp_document_revision(
+            collection_name, document_id, revision, source_path=source_path, tenant=self._tenant
+        )
+
     async def ingest_file(
         self,
         filepath: Path,
@@ -135,6 +161,7 @@ class IngestionService:
         source: str | None = None,
         organizational_unit: str | None = None,
         doc_date: str | None = None,
+        revision: str | None = None,
     ) -> IngestionResult:
         """`source_path` accepts URI schemes like gdrive://id or s3://bucket/key.
 
@@ -166,7 +193,8 @@ class IngestionService:
         and `doc_date` are the FA-039 business metadata; `document_type` is derived
         here from the parsed filetype (P1). All ride `document.metadata`, so
         `_build_chunk_metadata` writes them per chunk with no change to the write
-        path.
+        path. So does `revision`, a connector's version of the file, stored beside
+        `content_hash` for the next sync to compare before it downloads.
         """
         try:
             document: Document = await self.processor.process_file(filepath)
@@ -189,6 +217,7 @@ class IngestionService:
             document.metadata.source = source
             document.metadata.organizational_unit = organizational_unit
             document.metadata.doc_date = doc_date
+            document.metadata.revision = revision
             # document_type is the stored filetype/extension, a pure derivation
             # (FA-039 P1). A richer semantic document_category is deferred pending
             # issue-owner confirmation - do not overload document_type with it.

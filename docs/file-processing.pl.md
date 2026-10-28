@@ -1,5 +1,5 @@
 ---
-source_sha: "b2690527c166"
+source_sha: "54fd188fd445"
 ---
 
 # Przetwarzanie plików { #file-processing }
@@ -1134,6 +1134,48 @@ jest odpowiedzią, której nic potem nie koryguje. Plik, który został zastąpi
 liczony jest jako **aktualizacja**, a nie ingestia, odczytywana z
 `replaced_document_id`, a nie z własnego zdania wyniku.
 
+Konektor może też podać rewizję każdego pliku w swoim listingu, w
+`RemoteFile.revision`. Taką rewizją jest `ETag` z S3. Po pobraniu synchronizacja
+zapisuje rewizję odczytanych bajtów w metadanych wektorowych dokumentu, obok
+`content_hash`. W `new_only` i `update_only` synchronizacja pomija plik przed
+pobraniem, gdy jego rewizja z listingu jest równa zapisanej. Source nadal zgłasza
+roszczenie do pominiętego pliku, więc usuwanie go zostawia. Plik, który zmienia
+się albo zostaje usunięty w trakcie pobierania, też jest pomijany. Następna
+synchronizacja odczyta jego nową wersję albo usunie jego dokument.
+
+Gdy rewizja się zmieniła, a hash nie,
+synchronizacja wpisuje nową rewizję do zapisanego dokumentu i niczego nie
+embeduje. Dokument zapisany bez rewizji dostaje ją w ten sam sposób, po jednym
+pobraniu. `full` ignoruje rewizję, tak jak ignoruje hash. Synchronizacja
+porównuje i zapisuje rewizję tylko dla dokumentu pod adresem z listingu.
+Dokument znaleziony tylko po nazwie, na przykład przesłany plik, zostaje przy
+ścieżce hasha.
+
+Każdy taki zapis zmienia metadane każdego wiersza chunku dokumentu. PostgreSQL nie
+może wykonać go jako aktualizacji HOT, bo indeksy tabeli kolekcji czytają metadane,
+więc każdy wiersz dostaje też nowy wpis w każdym indeksie, także w indeksie
+wektorowym. Zmierzone na indeksie o 1536 wymiarach i 12 000 wierszach kosztuje to od
+2 do 6 ms na wiersz chunku, a na większym indeksie więcej.
+
+Pierwsza synchronizacja po aktualizacji zapisuje rewizję w każdym dokumencie
+zapisanym przed wprowadzeniem rewizji, więc na dużej kolekcji ta synchronizacja trwa
+dłużej. Po niej uruchom `VACUUM (ANALYZE)` na tabeli kolekcji albo pozwól, żeby autovacuum usunął
+stare wersje wierszy.
+
+Rewizja to jedyne miejsce, w którym oba flow mogą dać różne odpowiedzi. Lokalna
+synchronizacja rozpoznaje niezmieniony plik wyłącznie po hashu, a to sprawdzenie
+jest dokładne. Dokładna rewizja, taka jak `ETag` z S3 albo sha bloba w Git, daje
+tę samą odpowiedź co hash. Rewizja, która może przeoczyć zmianę, taka jak rozmiar
+i czas modyfikacji, może sprawić, że `new_only` i `update_only` pominą rzadką
+edycję. Środkiem zaradczym jest `full`: pobiera i wciąga ponownie każdy plik.
+Konektor, którego rewizja może przeoczyć zmianę, pisze o tym w swoim docstringu.
+
+Synchronizacja porównuje rewizję z listingu z rewizją zapisaną pod adresem,
+niezależnie od tego, który source ją zapisał. Dwa source S3 w jednej bazie
+wiedzy, z tą samą nazwą bucketu na dwóch endpointach, wymieniają ten sam adres.
+Rewizja zapisana przez jeden z nich może więc sprawić, że drugi pominie plik,
+którego treść pochodzi od pierwszego. To także naprawia `full`.
+
 **Dwie rzeczy o dopasowywaniu, i obie decydują o tym, czy dokument przeżyje.**
 
 Przedostatnią deską ratunku dla `existing_document` jest dopasowanie po *nazwie
@@ -1370,6 +1412,18 @@ dostarcza klienta, `SCHEME` i to, które pole `CONFIG_MODEL` wskazuje kontener -
 celowo blokujące, bo blokujące są wszystkie trzy SDK, a wspólna klasa uruchamia
 je na wątku roboczym.
 
+Klient podaje `ETag` każdego obiektu w `StoredObject.etag`, a wspólne listowanie
+mapuje go na `RemoteFile.revision`. Pobranie podaje `ETag` odczytanych bajtów. Duży
+obiekt jest czytany w zakresach przypiętych do jednego `ETag`, więc obiekt zmieniony
+między dwoma zakresami jest pomijany i odczytywany przy następnym przebiegu. Obiekt
+zmieniony poza API S3 magazynu, na przykład przez filer lub montowanie FUSE w
+SeaweedFS, może zachować stary `ETag`. Po takiej zmianie uruchom `full`.
+
+Obiekt usunięty po listingu też jest pomijany, a następny przebieg usuwa jego
+dokument. Odczyt z odpowiedzią 404 liczy się jako usunięcie tylko wtedy, gdy listing
+klucza już go nie wymienia, więc klucz, który magazyn wymienia, ale nie może go
+odczytać, jest błędem.
+
 Trzy rzeczy nie są tanie, a konektor bez nich jest rachunkiem albo
 niespodzianką, a nie funkcją:
 
@@ -1377,12 +1431,15 @@ niespodzianką, a nie funkcją:
   [#990](https://github.com/vstorm-co/agenticos/issues/990), a tym, co porównuje,
   jest `content_hash` bajtów — co oznacza, że pobiera plik, żeby dowiedzieć się,
   że był niezmieniony. To oszczędza embedding, ale nie transfer. Konektor, który
-  umie odpowiedzieć na pytanie „zmienione?” *bez* bajtów, powinien napisać to
-  w swoim docstringu — token `delta` z Grapha, `version.number` strony, sha
-  commita, HTTP-owy `ETag` — bo sygnał, który flow umie przeczytać przed
-  pobraniem, jest różnicą między nocną synchronizacją kosztującą jedno listowanie
-  a taką, która kosztuje cały folder. `content_hash` jest awaryjnym rozwiązaniem
-  tam, gdzie zdalny system naprawdę nie oferuje żadnego.
+  umie odpowiedzieć na pytanie „zmienione?” *bez* bajtów, podaje tę odpowiedź —
+  dla każdego pliku w `RemoteFile.revision`, na przykład `ETag` obiektu albo
+  `version.number` strony, albo dla całego źródła w `remote_version()`, na
+  przykład token `delta` z Grapha albo sha commita — bo sygnał, który flow umie
+  przeczytać przed pobraniem, jest różnicą między nocną synchronizacją kosztującą
+  jedno listowanie a taką, która kosztuje cały folder. Rewizja pochodzi
+  z listowania, nigdy z bajtów. O rewizji, która może przeoczyć zmianę, mówi
+  docstring konektora. `content_hash` jest awaryjnym rozwiązaniem tam, gdzie
+  zdalny system naprawdę nie oferuje żadnego.
 - **Poświadczenie zawężone na źródle.** Zobacz sekcję wyżej. `SECRET_KIND`
   konektora mówi, jakiego kształtu jest poświadczenie; nic w platformie nie umie
   powiedzieć, jak szeroko je wydano, i dlatego wskazówka należy do miejsca,

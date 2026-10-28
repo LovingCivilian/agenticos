@@ -257,7 +257,16 @@ class RAGSyncLogItem(BaseSchema):
     skipped: int = 0
     failed: int = 0
     removed: int = 0
-    error_message: str | None = None
+    error_message: str | None = Field(
+        None,
+        description=(
+            "Why the run failed, when its status is `error`. A run with status `done` "
+            "can also have a note here, for example when a crawl stopped at its page "
+            "limit, or when files changed or were deleted during the run and were left "
+            "for the next run. "
+            "Read `status` to know if the run failed."
+        ),
+    )
     started_at: str | None = None
     completed_at: str | None = None
 

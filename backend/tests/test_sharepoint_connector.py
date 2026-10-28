@@ -389,7 +389,7 @@ class TestTheCredential:
 
         listing = await connector.list_files({"site_url": SITE}, CREDENTIAL)
         welcome = next(f for f in listing.files if f.name == "Welcome.md")
-        await connector.download_file(
+        await connector.fetch_file(
             welcome, tmp_path, config={"site_url": SITE}, credential=CREDENTIAL
         )
 
@@ -687,7 +687,7 @@ class TestDownloads:
     async def test_a_file_is_written_where_the_base_class_says(self, tmp_path: Path) -> None:
         connector, handbook = await self._file(_handbook(), "Handbook.pdf")
 
-        path = await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+        path = (await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)).path
 
         assert path == tmp_path / "Handbook.pdf"
         assert path.read_bytes() == b"%PDF-1.7 hr"
@@ -700,7 +700,7 @@ class TestDownloads:
         tenant.delete("i-hr")
 
         with pytest.raises(WithdrawnFile, match="deleted from the library"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     async def test_an_item_with_nothing_to_download_is_withdrawn(self, tmp_path: Path) -> None:
         tenant = _handbook()
@@ -711,7 +711,7 @@ class TestDownloads:
         )
 
         with pytest.raises(WithdrawnFile, match="no longer a file"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     async def test_a_file_over_the_cap_is_refused_before_it_is_downloaded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -722,7 +722,7 @@ class TestDownloads:
         connector, handbook = await self._file(tenant, "Handbook.pdf")
 
         with pytest.raises(BadRequestError, match="is 3 MB, and a synced file may be at most 1 MB"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
         assert not [r for r in tenant.requests if r.url.host == "contoso.sharepoint.com"]
 
     async def test_a_body_larger_than_its_size_said_is_cut_off(
@@ -735,7 +735,7 @@ class TestDownloads:
         connector, handbook = await self._file(tenant, "Handbook.pdf")
 
         with pytest.raises(BadRequestError, match="larger than the 1 MB"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     async def test_a_download_url_outside_sharepoint_is_not_fetched(self, tmp_path: Path) -> None:
         tenant = _handbook()
@@ -743,7 +743,7 @@ class TestDownloads:
         tenant.download_host = "attacker.test"
 
         with pytest.raises(ExternalServiceError, match="outside SharePoint"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
         assert all(r.url.host != "attacker.test" for r in tenant.requests)
 
     async def test_a_redirect_is_followed_only_within_sharepoint(self, tmp_path: Path) -> None:
@@ -752,7 +752,7 @@ class TestDownloads:
         moved = "https://contoso.sharepoint.com/_layouts/15/download.aspx?id=i-hr&hop=2"
         tenant.queue("/_layouts/15/download.aspx", httpx.Response(302, headers={"location": moved}))
 
-        path = await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+        path = (await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)).path
         assert path.read_bytes() == b"%PDF-1.7 hr"
 
         tenant.queue(
@@ -760,7 +760,7 @@ class TestDownloads:
             httpx.Response(302, headers={"location": "https://attacker.test/x"}),
         )
         with pytest.raises(ExternalServiceError, match="outside SharePoint"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     async def test_a_relative_redirect_is_resolved_against_sharepoint(self, tmp_path: Path) -> None:
         tenant = _handbook()
@@ -770,7 +770,7 @@ class TestDownloads:
             httpx.Response(302, headers={"location": "/_layouts/15/download.aspx?id=i-hr&hop=2"}),
         )
 
-        path = await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+        path = (await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)).path
 
         assert path.read_bytes() == b"%PDF-1.7 hr"
         assert str(tenant.requests[-1].url).startswith("https://contoso.sharepoint.com/_layouts/")
@@ -784,7 +784,7 @@ class TestDownloads:
         )
 
         with pytest.raises(ExternalServiceError, match="too many times"):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     @pytest.mark.parametrize("answer", [httpx.Response(403), httpx.Response(302)])
     async def test_a_download_refused_is_a_failed_file(
@@ -797,7 +797,7 @@ class TestDownloads:
         with pytest.raises(
             ExternalServiceError, match=f"HTTP {answer.status_code} when Handbook.pdf"
         ):
-            await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+            await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)
 
     async def test_a_throttled_download_is_retried(self, tmp_path: Path) -> None:
         tenant = _handbook()
@@ -806,7 +806,7 @@ class TestDownloads:
             "/_layouts/15/download.aspx", httpx.Response(503, headers={"retry-after": "0"})
         )
 
-        path = await connector.download_file(handbook, tmp_path, credential=CREDENTIAL)
+        path = (await connector.fetch_file(handbook, tmp_path, credential=CREDENTIAL)).path
 
         assert path.read_bytes() == b"%PDF-1.7 hr"
 

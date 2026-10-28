@@ -29,11 +29,14 @@ function log(counts: Partial<RAGSyncLog>): RAGSyncLog {
   };
 }
 
-async function shown(entry: RAGSyncLog): Promise<HTMLElement> {
+async function shown(
+  entry: RAGSyncLog,
+  text: string | RegExp = /removed|ingested|no files processed/,
+): Promise<HTMLElement> {
   vi.mocked(apiClient.get).mockResolvedValue({ items: [entry], total: 1 });
   render(<SyncSourceLogs logsPath="/kb/k/sync-sources/s/logs" />);
   fireEvent.click(screen.getByRole("button"));
-  return screen.findByText(/removed|ingested|no files processed/);
+  return screen.findByText(text);
 }
 
 beforeEach(() => {
@@ -62,5 +65,32 @@ describe("SyncSourceLogs counts", () => {
     const line = await shown(log({}));
 
     expect(line.textContent).toBe("no files processed");
+  });
+});
+
+/**
+ * The message is red only for a failed run. A clean run can carry a note,
+ * such as files that changed while it ran, and drawn in red it read as a
+ * failure under a "done" status.
+ */
+describe("SyncSourceLogs message", () => {
+  it("draws a failed run's message as an error", async () => {
+    const failure = "1 files failed.";
+    const message = await shown(
+      log({ status: "error", failed: 1, error_message: failure }),
+      failure,
+    );
+
+    expect(message).toHaveClass("text-destructive");
+    expect(message).not.toHaveClass("text-muted-foreground");
+  });
+
+  it("draws a done run's note as muted text", async () => {
+    const note =
+      "2 files changed or were deleted while this sync ran, so they were left for the next sync.";
+    const message = await shown(log({ skipped: 2, error_message: note }), note);
+
+    expect(message).toHaveClass("text-muted-foreground");
+    expect(message).not.toHaveClass("text-destructive");
   });
 });

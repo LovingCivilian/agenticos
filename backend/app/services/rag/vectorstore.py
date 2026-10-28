@@ -151,6 +151,34 @@ class BaseVectorStore(ABC):
         """
 
     @abstractmethod
+    async def restamp_document_revision(
+        self,
+        collection_name: str,
+        document_id: str,
+        revision: str,
+        *,
+        source_path: str,
+        tenant: UUID | None = None,
+    ) -> None:
+        """Write a connector's `revision` onto every chunk of one stored document.
+
+        Used by a connector sync when a file's revision changed but its bytes
+        hash to the stored `content_hash` - an object uploaded again with
+        another part size, a file touched. Nothing is embedded again, but without
+        the new revision the next run would download the file again, and every
+        run after it. Every chunk, because the lookup may read any one of them,
+        and only the `revision` key: no other metadata and no row changes.
+
+        Only at `source_path`, the address the revision was read for: a document
+        stored under another address keeps what it has. Scoped to `tenant` as a
+        delete is, because a document id alone reaches every tenant's rows under
+        it on a shared runtime table (#1684). `None` matches only the untagged,
+        deployment-wide rows. A missing table is a no-op. A database error
+        raises: unlike the lookup, a write that failed is a failure, and the sync
+        counts the file as one.
+        """
+
+    @abstractmethod
     async def get_collection_info(
         self,
         collection_name: str,
@@ -372,9 +400,13 @@ class BaseVectorStore(ABC):
                     "filesize": metadata.get("filesize"),
                     "filetype": metadata.get("filetype"),
                     "additional_info": {
+                        **(metadata.get("additional_info") or {}),
+                        # After the parser's own keys, not before: a parser key
+                        # with one of these names, read as the document's own,
+                        # would decide whether a file is downloaded or skipped.
                         "source_path": metadata.get("source_path", ""),
                         "content_hash": metadata.get("content_hash", ""),
-                        **(metadata.get("additional_info") or {}),
+                        "revision": metadata.get("revision"),
                     },
                     "chunk_count": 0,
                 }
@@ -1034,6 +1066,53 @@ class PgVectorStore(BaseVectorStore):
                     "WHERE knowledge_base_id = :kb_id AND vector_document_id IS NOT NULL)"
                 ),
                 {"kb_id": knowledge_base_id, **org_params},
+            )
+            await session.commit()
+
+    async def restamp_document_revision(
+        self,
+        collection_name: str,
+        document_id: str,
+        revision: str,
+        *,
+        source_path: str,
+        tenant: UUID | None = None,
+    ) -> None:
+        """Set `metadata->>'revision'` on every row of one document, nothing else.
+
+        `||` merges the one key into the existing JSONB, so `content_hash`,
+        `source_path` and the tenant tag the next run matches on are untouched,
+        and a row that has no `revision` key yet gains one. The
+        `CAST` is needed because `jsonb_build_object` takes `"any"`, and asyncpg
+        cannot infer a bound parameter's type from that. The id is sanitized as
+        `delete_document` sanitizes it, and the `_org_filter(tenant)` conjunct
+        confines the write to the rows the caller's tenant stamped (#1684).
+
+        The `source_path` conjunct is also what keeps this from a scan. There is
+        no index on `parent_doc_id`, and the tenant's hash index covers every
+        row the organization holds, so by id alone each refresh read the whole
+        collection - measured at 4 ms a document at 8,000 rows and 8 at 80,000,
+        which makes the first sync after an upgrade quadratic in the collection.
+        The address's hash index finds a document's rows directly.
+        """
+        if not await self._collection_exists(collection_name):
+            return
+        table = self._table(collection_name)
+        org_clause, org_params = self._org_filter(tenant)
+        async with self.async_session() as session:
+            await session.execute(
+                text(
+                    f"UPDATE {table} SET metadata = metadata || "
+                    "jsonb_build_object('revision', CAST(:revision AS text)) "
+                    "WHERE parent_doc_id = :doc_id AND metadata->>'source_path' = :source_path "
+                    f"AND {org_clause}"
+                ),
+                {
+                    "revision": revision,
+                    "doc_id": self._sanitize_id(document_id),
+                    "source_path": source_path,
+                    **org_params,
+                },
             )
             await session.commit()
 

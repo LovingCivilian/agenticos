@@ -14,7 +14,7 @@ everything a reader of three connectors would otherwise have to check three
 times - that a key ending in `/` is a directory marker and not a document, that
 `source_path` is `<scheme>://<container>/<key>` and is the dedup key the whole
 sync path matches on, and that the destination is the base class's answer rather
-than the connector's (`BaseSyncConnector.download_file`, which is inherited for
+than the connector's (`BaseSyncConnector.fetch_file`, which is inherited for
 the reason its own docstring gives).
 """
 
@@ -42,13 +42,21 @@ logger = logging.getLogger(__name__)
 class StoredObject(BaseModel):
     """One object in a listing, in the terms all three stores describe one in.
 
-    Deliberately not an `etag`. Every object store offers one and the sync path
-    reads none: it compares a `content_hash` of the bytes it downloaded (#990),
-    so an `etag` carried here would be a field nothing reads. A connector that
-    can answer "changed?" *without* the bytes is worth having - it saves the
-    transfer, not just the embedding - and `docs/file-processing.md` says so under
-    what a new connector owes; the place to add it is there and then, with the
-    caller that reads it.
+    `etag` is the object's revision: the sync compares it with the one
+    stored beside the document and skips the download when they are equal, which
+    saves the transfer and not only the embedding. Every object store has one,
+    and on a store that keeps it current, it changes whenever the content does.
+    It is not always a hash of the bytes: an S3 multipart upload's `ETag` is the
+    MD5 of its parts' MD5s with a `-<parts>` suffix, and an SSE-KMS or SSE-C
+    object's is no MD5 at all. So the same bytes uploaded again with another
+    part size, or copied, can get a new one. That costs one download, after
+    which the hash finds the content unchanged and the stored revision is
+    refreshed - never a skipped change.
+    What is stored is the `ETag` `_download` reports for the bytes it read, so
+    an object replaced after the listing is filed under its own version. An
+    `ETag` is only as exact as the store behind it: an object changed outside
+    its S3 API - a SeaweedFS filer or FUSE write - can keep the old one, and
+    `full` is the remedy.
 
     `modified_at` is carried because `RemoteFile` already has somewhere to put
     it.
@@ -57,6 +65,7 @@ class StoredObject(BaseModel):
     key: str
     size: int | None = None
     modified_at: datetime | None = None
+    etag: str | None = None
 
 
 class ObjectStoreConnector(BaseSyncConnector):
@@ -120,6 +129,7 @@ class ObjectStoreConnector(BaseSyncConnector):
                 name=Path(obj.key).name,
                 size=obj.size,
                 modified_at=obj.modified_at,
+                revision=obj.etag,
                 source_path=f"{self.SCHEME}://{container}/{obj.key}",
             )
             for obj in self._objects(container, prefix, config, credential)
@@ -132,10 +142,12 @@ class ObjectStoreConnector(BaseSyncConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
-    ) -> None:
-        """Write one object to the path the base class chose."""
+    ) -> str | None:
+        """Write one object to the path the base class chose, and answer its `ETag`."""
         container = file.source_path.removeprefix(f"{self.SCHEME}://").split("/", 1)[0]
-        await asyncio.to_thread(self._download, container, file.id, dest_path, config, credential)
+        etag = await asyncio.to_thread(
+            self._download, container, file.id, dest_path, config, credential, size=file.size
+        )
         logger.info(
             "Downloaded %s://%s/%s (%d bytes)",
             self.SCHEME,
@@ -143,6 +155,7 @@ class ObjectStoreConnector(BaseSyncConnector):
             file.id,
             dest_path.stat().st_size,
         )
+        return etag
 
     @abstractmethod
     def _objects(
@@ -168,5 +181,15 @@ class ObjectStoreConnector(BaseSyncConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
-    ) -> None:
-        """Write one object's bytes to `dest_path`. Blocking, on a worker thread."""
+        *,
+        size: int | None,
+    ) -> str | None:
+        """Write one object's bytes to `dest_path`, and answer the `ETag` of those bytes.
+
+        Blocking, on a worker thread. The `ETag` comes from the responses that
+        carried the bytes, never from the listing: the object may have changed
+        since, and the sync stores this one beside the document. A download that
+        spans several requests pins them to one version, and raises
+        `ChangedSinceListing` when the store refuses a later one because the
+        object moved. `size` is the listed one, a hint for how to fetch.
+        """

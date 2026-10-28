@@ -28,7 +28,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -40,7 +40,7 @@ flowchart TD
 2. User triggers a **sync** (via API, CLI, or scheduled task)
 3. Whoever runs the sync unseals that secret and hands it in; the connector's
    `list_files()` returns a `RemoteListing`
-4. For each file, `BaseSyncConnector.download_file()` decides where it may land
+4. For each file, `BaseSyncConnector.fetch_file()` decides where it may land
    and calls the connector's `_fetch()` to write it there
 5. The ingestion pipeline parses, chunks, embeds, and stores each file
 6. If the listing was complete, the documents this source brought in earlier and
@@ -56,7 +56,7 @@ flowchart TD
     you are given, and nothing else** - a connector that picked its own path
     would be one refusal per connector to remember.
 
-`download_file()` is concrete and is not overridden. It resolves
+`fetch_file()` is concrete and is not overridden. It resolves
 `RemoteFile.name` against the sync directory and confirms containment before a
 byte is written, then hands `_fetch()` a `dest_path` to write to.
 
@@ -108,6 +108,14 @@ and a connector overrides one when its source can answer the question it asks.
 |------|---------|------------------|
 | `remote_version(config, credential, previous)` | `None`: every run lists | The source can say cheaply what its whole content is at, such as a commit or a change token. After a run with nothing failed, the sync stores the value with a fingerprint of the configuration. The next run that finds the same pair stops before `list_files()`. The value must change whenever any listed file, or the listing itself, could have changed. `previous` is the value the last clean run stored under the same configuration, or `None`. A source that can only report what changed *since* a point, such as a Graph delta link, answers `previous` back when nothing has changed. |
 | `aclose()` | nothing | The connector keeps something between `list_files()` and the downloads, such as a clone or a session. It is called once the sync is over, whether the sync succeeded or not. |
+
+`remote_version()` answers for the whole source. A source that can only describe
+each file reports a revision for each one instead, in `RemoteFile.revision`: the
+version the listing gives the file, such as an object's `ETag`. In `new_only` and
+`update_only`, the sync does not download a file whose listed revision equals the
+stored one. `_fetch` returns the revision of the bytes it wrote, and the sync
+stores that one. The default, `None`, keeps the download and the `content_hash`
+check.
 
 ## Step by step: a Notion connector
 
@@ -421,9 +429,12 @@ connectors (`GoogleDriveConfig`, `S3Config`, `WebConfig`) are the models to copy
 ## Tips
 
 - Set `RemoteFile.source_path` to a unique URI (e.g., `notion://page_id`) — this is used for deduplication across syncs, and it is what removal compares: a document whose `source_path` a complete listing no longer names is removed
+- Fill `RemoteFile.revision` from the listing, never from the downloaded bytes, because its purpose is to skip the download. If the value can miss a change, such as a size and a modification time, say so in the connector's docstring: `new_only` and `update_only` trust it, and a `full` run is the remedy
+- `_fetch` returns the revision of the bytes it wrote, or `None`, because the sync stores that one. A skipped file never reaches `_fetch`. If `_fetch` refuses a file for a reason that does not change the revision, such as a robots.txt rule, check that reason in the listing too
+- Raise `ChangedSinceListing` only when the source shows that the file changed or went during the download, such as a new version, or a listing that no longer names the file. Never raise it for a failed read alone: a read that fails on every run would then be skipped on every run. The evidence comes from the same source, so a source whose listing and reads disagree in the same way on every run still makes the file a skip on every run
 - Return `complete=False` from a listing that stopped short, and never raise for one you can still partly use
 - Use `asyncio.to_thread()` to wrap blocking SDK calls so they don't block the event loop
 - Implement `validate_config()` to refuse a config the wizard can still fix — a `ConfigRefusal` naming a `field` is what makes it mark that input rather than show a sentence over four of them. It sees the config and not the credential, so "can this key reach the service" is a question for the first sync, not for this method
 - Declare `SECRET_KIND` and read the credential from the `credential` argument. A credential never goes in `CONFIG_MODEL`, and there is no deployment-wide fallback to fall back to
 - Settings in `app/core/config.py` and `.env` are for values that name no principal — where a store is, not who is asking (`S3_RAG_ENDPOINT` is the shape)
-- `_fetch()` writes to the `dest_path` it is handed and returns nothing — the base class answers where that is, and the ingestion pipeline handles everything from there
+- `_fetch()` writes to the `dest_path` it is handed and returns the revision of those bytes, or `None` — the base class answers where that is, and the ingestion pipeline handles everything from there

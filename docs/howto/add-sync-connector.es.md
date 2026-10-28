@@ -1,5 +1,5 @@
 ---
-source_sha: "1ff020c86d59"
+source_sha: "46235edd79a2"
 ---
 
 # Añade un sync connector { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -45,7 +45,7 @@ flowchart TD
 2. Alguien lanza un **sync** (por la API, la CLI o una tarea programada)
 3. Quien ejecuta el sync desprecinta ese secreto y lo pasa; el `list_files()` del
    connector devuelve un `RemoteListing`
-4. Para cada archivo, `BaseSyncConnector.download_file()` decide dónde puede
+4. Para cada archivo, `BaseSyncConnector.fetch_file()` decide dónde puede
    aterrizar y llama al `_fetch()` del connector para escribirlo ahí
 5. El pipeline de ingesta analiza, trocea, embebe y almacena cada archivo
 6. Si el listado estaba completo, los documentos que esta source trajo antes y
@@ -61,7 +61,7 @@ flowchart TD
     **Escribe en el `dest_path` que se te entrega, y en nada más** - un connector
     que eligiera su propia ruta sería una negativa por connector que recordar.
 
-`download_file()` es concreto y no se sobrescribe. Resuelve `RemoteFile.name`
+`fetch_file()` es concreto y no se sobrescribe. Resuelve `RemoteFile.name`
 contra el directorio de sync y confirma la contención antes de escribir un solo
 byte, y luego entrega a `_fetch()` un `dest_path` en el que escribir.
 
@@ -116,6 +116,14 @@ sobrescribe los dos, y también `SharePointConnector`, en
 |------|---------|------------------|
 | `remote_version(config, credential, previous)` | `None`: cada ejecución lista | La source puede decir de forma barata en qué punto está todo su contenido, como un commit o un token de cambios. Tras una ejecución sin ningún fallo, el sync guarda el valor junto con una huella de la configuración. La siguiente ejecución que encuentra el mismo par se detiene antes de `list_files()`. El valor tiene que cambiar siempre que haya podido cambiar cualquier archivo listado, o el propio listado. `previous` es el valor que guardó la última ejecución limpia con la misma configuración, o `None`. Una source que solo puede informar de lo que ha cambiado *desde* un punto, como un delta link de Graph, devuelve `previous` tal cual cuando no ha cambiado nada. |
 | `aclose()` | nada | El connector conserva algo entre `list_files()` y las descargas, como un clon o una sesión. Se llama una vez terminado el sync, tanto si ha salido bien como si no. |
+
+`remote_version()` responde por toda la source. Una source que solo puede
+describir cada archivo por separado informa en su lugar de una revisión para cada
+uno, en `RemoteFile.revision`: la versión que el listado da al archivo, como el
+`ETag` de un objeto. En `new_only` y `update_only`, el sync no descarga un archivo
+cuya revisión listada es igual a la guardada. `_fetch` devuelve la revisión de
+los bytes que escribió, y el sync guarda esa. El valor por defecto, `None`,
+mantiene la descarga y la comprobación de `content_hash`.
 
 ## Paso a paso: un connector de Notion { #step-by-step-a-notion-connector }
 
@@ -432,9 +440,12 @@ los connectors que vienen incluidos (`GoogleDriveConfig`, `S3Config`,
 ## Consejos { #tips }
 
 - Pon en `RemoteFile.source_path` un URI único (por ejemplo, `notion://page_id`) — sirve para deduplicar entre syncs, y es lo que compara la eliminación: un documento cuyo `source_path` ya no nombra un listado completo se elimina
+- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio
+- `_fetch` devuelve la revisión de los bytes que escribió, o `None`, porque la sincronización guarda esa. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
+- Lanza `ChangedSinceListing` solo cuando el origen muestra que el archivo cambió o desapareció durante la descarga, como una versión nueva, o un listado que ya no nombra el archivo. Nunca la lances solo porque una lectura falló: una lectura que falla en cada ejecución se saltaría entonces en cada ejecución. La prueba viene del mismo origen, así que un origen cuyo listado y lecturas no coinciden de la misma forma en cada ejecución sigue haciendo que el archivo se salte en cada ejecución
 - Devuelve `complete=False` desde un listado que se quedó corto, y nunca lances una excepción por uno que todavía puedes usar en parte
 - Envuelve con `asyncio.to_thread()` las llamadas bloqueantes de un SDK para que no bloqueen el event loop
 - Implementa `validate_config()` para rechazar una configuración que el asistente todavía puede arreglar — una `ConfigRefusal` que nombra un `field` es lo que hace que marque ese campo de entrada en lugar de mostrar una frase sobre cuatro de ellos. Ve la configuración y no la credencial, así que "puede esta clave llegar al servicio" es una pregunta para el primer sync, no para este método
 - Declara `SECRET_KIND` y lee la credencial del argumento `credential`. Una credencial no va nunca en `CONFIG_MODEL`, y no hay ningún recurso de reserva a escala de deployment al que recurrir
 - Los ajustes de `app/core/config.py` y `.env` son para valores que no nombran a ningún principal — dónde está un almacén, no quién pregunta (`S3_RAG_ENDPOINT` es la forma)
-- `_fetch()` escribe en el `dest_path` que se le entrega y no devuelve nada — la clase base responde dónde está eso, y el pipeline de ingesta se encarga de todo lo demás
+- `_fetch()` escribe en el `dest_path` que se le entrega y devuelve la revisión de esos bytes, o `None` — la clase base responde dónde está eso, y el pipeline de ingesta se encarga de todo lo demás

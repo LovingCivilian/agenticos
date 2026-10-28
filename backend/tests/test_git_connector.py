@@ -183,7 +183,7 @@ class TestWhatASyncReads:
             files = (
                 await connector.list_files(_config(include=["docs/guides/*.md"]), _token())
             ).files
-            landed = await connector.download_file(files[0], dest)
+            landed = (await connector.fetch_file(files[0], dest)).path
         finally:
             await connector.aclose()
 
@@ -194,7 +194,7 @@ class TestWhatASyncReads:
         try:
             await connector.list_files(_config(), _token())
             with pytest.raises(BadRequestError):
-                await connector.download_file(
+                await connector.fetch_file(
                     RemoteFile(id="../../outside.md", name="outside.md", source_path="git://x/y"),
                     tmp_path,
                 )

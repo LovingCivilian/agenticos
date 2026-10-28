@@ -62,6 +62,11 @@ class DocumentMetadata(BaseModel):
       metadata; `document_type` is the stored filetype/extension (FA-039 P1;
       a richer semantic `document_category` is deferred), `doc_date` is a pure
       calendar date normalized to ISO `YYYY-MM-DD` at ingestion.
+    - `revision` is written only by a connector sync, from `FetchedFile.revision`:
+      the version of the bytes `_fetch` wrote, as the remote system named it.
+      The next sync compares the listed revision with it before the
+      download. It sits beside `content_hash` on every chunk, so the
+      clean-up after a dead run removes it with the vectors it describes.
     """
 
     filename: str
@@ -69,6 +74,7 @@ class DocumentMetadata(BaseModel):
     filetype: str
     source_path: str = ""  # original path: local path, s3://bucket/key, gdrive://file_id
     content_hash: str = ""  # SHA256 hash for deduplication
+    revision: str | None = None
     organization_id: str | None = None
     source: str | None = None
     document_type: str | None = None

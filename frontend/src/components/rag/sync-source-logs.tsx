@@ -66,8 +66,18 @@ function LogRow({ log }: { log: RAGSyncLog }) {
         {log.status !== "running" && log.status !== "pending" && (
           <p className="text-muted-foreground mt-0.5 text-xs">{outcome.join(" · ")}</p>
         )}
+        {/* A done run can carry a note too - a crawl stopped at its page
+            limit, files that changed while it ran - and a note is not a
+            failure. */}
         {log.error_message && (
-          <p className="text-destructive mt-0.5 text-xs leading-snug">{log.error_message}</p>
+          <p
+            className={cn(
+              "mt-0.5 text-xs leading-snug",
+              log.status === "error" ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {log.error_message}
+          </p>
         )}
       </div>
     </div>
