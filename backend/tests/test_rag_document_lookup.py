@@ -323,6 +323,7 @@ class TestTheRevisionTravelsWithTheDocument:
         written: Document = insert.await_args.kwargs["document"]
         assert written.metadata.revision is None
 
+    @pytest.mark.security
     async def test_a_refreshed_revision_is_written_in_the_ingesters_tenant(self):
         """The same confinement as the replace-delete (#1684): a document id
         alone reaches every tenant's rows under it on a shared table. And at
