@@ -35,19 +35,22 @@ class RemoteFile(BaseModel):
 
     `revision` is the file's version as the remote system reports it in the
     listing - an S3 `ETag`, a Git blob sha - never a value calculated from the
-    bytes, because its whole point is to be known before the download. The sync
-    stores it beside the document's `content_hash`, and in `new_only` and
-    `update_only` a listed revision equal to the stored one skips the download.
-    So equal revisions at one `source_path` must mean equal content. A
-    connector whose revision can miss a change says so in its docstring, and
-    `full` is the remedy for it. The sync stores the listed revision with
-    whatever `_fetch` wrote, so `_fetch` writes that revision's bytes or raises:
-    a file replaced between the listing and the download would otherwise be
-    filed under its old revision. A skipped file never reaches `_fetch`, so a
-    connector that refuses a file there for a reason the revision does not
-    cover - a robots.txt rule, a size limit lowered since - checks it in the
-    listing too, or reports no revision. `None` is "no revision": the file takes
-    the download and the hash, as every file did before.
+    bytes, because its whole point is to be known before the download. In
+    `new_only` and `update_only`, a listed revision equal to the one stored
+    beside the document's `content_hash` skips the download. So equal
+    revisions at one `source_path` must mean equal content. A connector whose
+    revision can miss a change says so in its docstring, and `full` is the
+    remedy for it.
+
+    What is stored is not this value but the one `_fetch` reports for the bytes
+    it wrote (`FetchedFile.revision`): a file replaced between the listing and
+    the download arrives as its new version, and filed under the listed one it
+    would be skipped for good once its old bytes came back. A skipped file never
+    reaches `_fetch`, so a connector that refuses a file there for a reason the
+    revision does not cover - a robots.txt rule, a size limit lowered since -
+    checks it in the listing too, or reports no revision. `None` is "no
+    revision": the file takes the download and the hash, as every file did
+    before.
     """
 
     id: str
@@ -93,6 +96,36 @@ class WithdrawnFile(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class ChangedSinceListing(Exception):
+    """A listed file that changed while it was being fetched.
+
+    An object store refuses a ranged read pinned to a version the object has
+    left, which is the only way a download that takes many requests can tell
+    that it would otherwise write one version's start and another's end. Raised
+    from `_fetch`, this tells the sync that the file is neither broken nor
+    withdrawn: it is skipped, its document stays claimed, and the next listing
+    names the version it has now. `message` is a sentence this repository
+    wrote, as a listing's `problems` are.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class FetchedFile(BaseModel):
+    """Where a downloaded file landed, and which version of it the bytes are.
+
+    `revision` is what the remote system said about the bytes it sent - an
+    `ETag` from the response - and `None` when the connector cannot say. It is
+    what the sync stores beside the document, so `None` means the next run
+    downloads the file again rather than trust a listing it cannot check.
+    """
+
+    path: Path
+    revision: str | None = None
 
 
 class ConfigRefusal(BaseModel):
@@ -158,14 +191,14 @@ class BaseSyncConnector(ABC):
         ingested - see `RemoteListing`.
         """
 
-    async def download_file(
+    async def fetch_file(
         self,
         file: RemoteFile,
         dest_dir: Path,
         config: ConnectorConfig | None = None,
         credential: StorableSecret | None = None,
-    ) -> Path:
-        """Download one file into `dest_dir` and answer the local path it landed at.
+    ) -> FetchedFile:
+        """Download one file into `dest_dir`: where it landed, and which version it is.
 
         **Where the file lands is this class's answer, not a connector's.** The
         two shipped connectors used to decide it separately and disagreed: S3
@@ -175,10 +208,26 @@ class BaseSyncConnector(ABC):
         implementation a path rather than a directory is what makes the answer
         inherited instead of remembered - see `destination_within` for the
         refusal itself.
+
+        Raises:
+            ChangedSinceListing: the file changed while it was being fetched.
         """
         dest_path = destination_within(dest_dir, file.name)
-        await self._fetch(file, dest_path, config or {}, credential)
-        return dest_path
+        revision = await self._fetch(file, dest_path, config or {}, credential)
+        return FetchedFile(path=dest_path, revision=revision)
+
+    async def download_file(
+        self,
+        file: RemoteFile,
+        dest_dir: Path,
+        config: ConnectorConfig | None = None,
+        credential: StorableSecret | None = None,
+    ) -> Path:
+        """Download one file into `dest_dir` and answer the local path it landed at.
+
+        `fetch_file` without the version, for a caller that only needs the bytes.
+        """
+        return (await self.fetch_file(file, dest_dir, config, credential)).path
 
     @abstractmethod
     async def _fetch(
@@ -187,8 +236,14 @@ class BaseSyncConnector(ABC):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
-    ) -> None:
-        """Write `file`'s bytes to `dest_path`, which is already inside the sync directory."""
+    ) -> str | None:
+        """Write `file`'s bytes to `dest_path`, which is already inside the sync directory.
+
+        Answers the revision of the bytes written, as the remote system said in
+        the response that carried them, or `None` when it said nothing a later
+        listing could be compared with. Never the listed `file.revision` on
+        trust: the file may have changed since.
+        """
 
     async def remote_version(
         self, config: ConnectorConfig, credential: StorableSecret | None, previous: str | None

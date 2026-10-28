@@ -23,10 +23,10 @@ Two things are versioned separately from this file and worth knowing about:
 
 - A connector sync in `new_only` and `update_only` no longer downloads a file
   whose remote revision is unchanged. The S3 connector reports each object's
-  `ETag` as its revision, and downloads only that version: an object changed
-  since the listing fails and syncs on the next run. `full` still downloads every
-  file. The first sync after the upgrade downloads each file one more time, to
-  store its revision.
+  `ETag` as its revision, and the sync stores the `ETag` of the bytes it
+  downloaded. A file that changes during its download is skipped, and the next
+  sync reads it. `full` still downloads every file. The first sync after the
+  upgrade downloads each file one more time, to store its revision.
 
 ## [1.27.0] - 2026-10-27
 

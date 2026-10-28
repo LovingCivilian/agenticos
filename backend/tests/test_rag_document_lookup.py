@@ -325,21 +325,28 @@ class TestTheRevisionTravelsWithTheDocument:
 
     async def test_a_refreshed_revision_is_written_in_the_ingesters_tenant(self):
         """The same confinement as the replace-delete (#1684): a document id
-        alone reaches every tenant's rows under it on a shared table."""
+        alone reaches every tenant's rows under it on a shared table. And at
+        the address the revision was read for, which is also what lets the
+        store find the rows by an index rather than a scan."""
         tenant = uuid.uuid4()
-        seen: list[tuple[str, str, str, uuid.UUID | None]] = []
+        seen: list[tuple[str, str, str, str, uuid.UUID | None]] = []
 
         async def restamp(
-            collection_name: str, document_id: str, revision: str, tenant: uuid.UUID | None = None
+            collection_name: str,
+            document_id: str,
+            revision: str,
+            *,
+            source_path: str,
+            tenant: uuid.UUID | None = None,
         ) -> None:
-            seen.append((collection_name, document_id, revision, tenant))
+            seen.append((collection_name, document_id, revision, source_path, tenant))
 
         store = _store([], restamp_document_revision=AsyncMock(side_effect=restamp))
         service = IngestionService(processor=MagicMock(), vector_store=store, tenant=tenant)
 
-        await service.restamp_revision("kb", "doc-a", '"etag-2"')
+        await service.restamp_revision("kb", "doc-a", '"etag-2"', "s3://acme/handbook.pdf")
 
-        assert seen == [("kb", "doc-a", '"etag-2"', tenant)]
+        assert seen == [("kb", "doc-a", '"etag-2"', "s3://acme/handbook.pdf", tenant)]
 
     async def test_a_refresh_the_store_refuses_raises(self):
         """Unlike the lookup, which answers "no match" on a store error: a write
@@ -350,7 +357,7 @@ class TestTheRevisionTravelsWithTheDocument:
         service = IngestionService(processor=MagicMock(), vector_store=store)
 
         with pytest.raises(RuntimeError, match="connection refused"):
-            await service.restamp_revision("kb", "doc-a", '"etag-2"')
+            await service.restamp_revision("kb", "doc-a", '"etag-2"', "s3://acme/handbook.pdf")
 
 
 class TestADocumentThatNamesItsOwnAddress:

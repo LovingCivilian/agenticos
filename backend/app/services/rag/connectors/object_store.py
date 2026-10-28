@@ -51,8 +51,11 @@ class StoredObject(BaseModel):
     same bytes uploaded again with another part size, or copied, can get a new
     one. That costs one download, after which the hash finds the content
     unchanged and the stored revision is refreshed - never a skipped change.
-    `_download` is handed the listed `etag` so that what it writes is that
-    version, not whatever the object became after the listing.
+    What is stored is the `ETag` `_download` reports for the bytes it read, so
+    an object replaced after the listing is filed under its own version. An
+    `ETag` is only as exact as the store behind it: an object changed outside
+    its S3 API - a SeaweedFS filer or FUSE write - can keep the old one, and
+    `full` is the remedy.
 
     `modified_at` is carried because `RemoteFile` already has somewhere to put
     it.
@@ -138,11 +141,11 @@ class ObjectStoreConnector(BaseSyncConnector):
         dest_path: Path,
         config: ConnectorConfig,
         credential: StorableSecret | None,
-    ) -> None:
-        """Write one object to the path the base class chose."""
+    ) -> str | None:
+        """Write one object to the path the base class chose, and answer its `ETag`."""
         container = file.source_path.removeprefix(f"{self.SCHEME}://").split("/", 1)[0]
-        await asyncio.to_thread(
-            self._download, container, file.id, dest_path, config, credential, etag=file.revision
+        etag = await asyncio.to_thread(
+            self._download, container, file.id, dest_path, config, credential, size=file.size
         )
         logger.info(
             "Downloaded %s://%s/%s (%d bytes)",
@@ -151,6 +154,7 @@ class ObjectStoreConnector(BaseSyncConnector):
             file.id,
             dest_path.stat().st_size,
         )
+        return etag
 
     @abstractmethod
     def _objects(
@@ -177,13 +181,14 @@ class ObjectStoreConnector(BaseSyncConnector):
         config: ConnectorConfig,
         credential: StorableSecret | None,
         *,
-        etag: str | None,
-    ) -> None:
-        """Write one object's bytes to `dest_path`. Blocking, on a worker thread.
+        size: int | None,
+    ) -> str | None:
+        """Write one object's bytes to `dest_path`, and answer the `ETag` of those bytes.
 
-        `etag` is the one the listing reported, and the bytes written must be
-        that version's or this raises. The sync stores the listed revision with
-        what this wrote, so an object replaced between the listing and the
-        download would otherwise be filed under the old `ETag` - and skipped on
-        every run after its old bytes came back. `None` is no listed `ETag`.
+        Blocking, on a worker thread. The `ETag` comes from the responses that
+        carried the bytes, never from the listing: the object may have changed
+        since, and the sync stores this one beside the document. A download that
+        spans several requests pins them to one version, and raises
+        `ChangedSinceListing` when the store refuses a later one because the
+        object moved. `size` is the listed one, a hint for how to fetch.
         """

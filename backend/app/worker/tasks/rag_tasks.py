@@ -44,7 +44,12 @@ from app.services.ingestion_config import (
 )
 from app.services.notifications import NotificationService
 from app.services.rag.config import DocumentExtensions
-from app.services.rag.connectors import CONNECTOR_REGISTRY, RemoteListing, WithdrawnFile
+from app.services.rag.connectors import (
+    CONNECTOR_REGISTRY,
+    ChangedSinceListing,
+    RemoteListing,
+    WithdrawnFile,
+)
 from app.services.rag.documents import DocumentProcessor
 from app.services.rag.embeddings import EmbeddingService
 from app.services.rag.failures import IngestionStage, failure_summary
@@ -1304,6 +1309,11 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
     # Listed files a fetch found the source no longer holds - a sitemap page now
     # marked `noindex`, or gone. Not failures: removed like any unlisted file.
     withdrawn: set[str] = set()
+    # Listed files that changed while they were fetched. Not failures either:
+    # skipped, still claimed, and read by the next run, which lists their new
+    # version. Counted as a failure, a file that only moved put the source in
+    # `error` and sent a failure notice.
+    changed_while_fetched = 0
     # The stored documents found at listed addresses, as `(source_path,
     # vector_document_id)`: this source lists them, so it claims them, whichever
     # source ingested them and whether or not this run gets as far as the
@@ -1406,9 +1416,10 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                             skipped += 1
                             continue
 
-                        local_path = await connector.download_file(
+                        fetched = await connector.fetch_file(
                             remote_file, Path(tmp_dir), config=config, credential=credential
                         )
+                        local_path = fetched.path
 
                         # After it, because a hash needs the bytes and no remote
                         # system on this list offers one. A stored document with no
@@ -1424,14 +1435,24 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                                 == existing.content_hash
                             )
                         ):
-                            # The bytes are current but the revision moved - a file
+                            # The bytes are current but the version moved - a file
                             # touched, an object uploaded again - or the document
-                            # predates revisions. Recording the listed one is what
-                            # lets the next run skip the download. Never on a match
-                            # by name, for the reason the skip above gives.
-                            if remote_file.revision and at_address and existing.document_id:
+                            # predates revisions. Recording the one the download
+                            # reported, not the listed one, is what lets the next run
+                            # skip it: the file may have changed since the listing.
+                            # Never on a match by name, for the reason the skip above
+                            # gives, and never a write of what is already stored.
+                            if (
+                                fetched.revision
+                                and fetched.revision != existing.revision
+                                and at_address
+                                and existing.document_id
+                            ):
                                 await ingester.restamp_revision(
-                                    collection_name, existing.document_id, remote_file.revision
+                                    collection_name,
+                                    existing.document_id,
+                                    fetched.revision,
+                                    remote_file.source_path,
                                 )
                             skipped += 1
                             continue
@@ -1489,7 +1510,8 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                                 # correct, tested, and with no data behind it
                                 # (#1777).
                                 organizational_unit=source.organizational_unit,
-                                revision=remote_file.revision,
+                                # What the download read, not what the listing said.
+                                revision=fetched.revision,
                             )
 
                         await _settle_document_row(
@@ -1509,6 +1531,10 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                         logger.info("Not syncing %s: %s", remote_file.name, e.message)
                         withdrawn.add(remote_file.source_path)
                         total -= 1
+                    except ChangedSinceListing as e:
+                        logger.info("Not syncing %s yet: %s", remote_file.name, e.message)
+                        skipped += 1
+                        changed_while_fetched += 1
                     except Exception as e:
                         logger.warning("Failed to sync %s: %s", remote_file.name, e)
                         failed += 1
@@ -1534,6 +1560,11 @@ async def _sync_source(source_id: str, sync_log_id: str | None) -> dict[str, Any
                                 inherited=inherited.get(remote_file.source_path, frozenset()),
                             )
 
+            if changed_while_fetched:
+                notes.append(
+                    f"{changed_while_fetched} files changed while this sync ran and will be "
+                    "synced by the next one."
+                )
             if kept:
                 from app.services.rag_document import RAGDocumentService
 

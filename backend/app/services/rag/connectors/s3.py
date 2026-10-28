@@ -15,6 +15,7 @@ or GCS connector is a client rather than a second copy of them (#988).
 
 import logging
 import shutil
+import threading
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import datetime
@@ -24,15 +25,34 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.core.exceptions import BadRequestError
+from app.core.exceptions import BadRequestError, ExternalServiceError
 from app.core.secret_kinds import AwsCredentialsSecret, SecretKind, StorableSecret
-from app.services.rag.connectors import ConnectorConfig
+from app.services.rag.connectors import ChangedSinceListing, ConnectorConfig
 from app.services.rag.connectors.object_store import ObjectStoreConnector, StoredObject
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient
 
 logger = logging.getLogger(__name__)
+
+
+class _Received:
+    """The bytes an s3transfer download received, as its progress reports them.
+
+    A subscriber in s3transfer's sense by shape, not by base class, so this
+    module does not import s3transfer wherever it is imported (#2225).
+    s3transfer reports each chunk it writes and takes back what a retried range
+    had sent, so the sum is what arrived - which a range answered with 416, and
+    written as nothing, never adds to.
+    """
+
+    def __init__(self) -> None:
+        self.bytes = 0
+        self._lock = threading.Lock()
+
+    def on_progress(self, future: object, bytes_transferred: int, **_: object) -> None:
+        with self._lock:
+            self.bytes += bytes_transferred
 
 
 class S3Config(BaseModel):
@@ -172,7 +192,10 @@ class S3Connector(ObjectStoreConnector):
                     key=obj["Key"],
                     size=obj.get("Size"),
                     modified_at=modified_at,
-                    etag=obj.get("ETag"),
+                    # An empty `ETag` is no revision: a store that sends `""`
+                    # for an object it has not read yet would make every
+                    # version of it look the same.
+                    etag=obj.get("ETag") or None,
                 )
 
     def _download(
@@ -183,20 +206,158 @@ class S3Connector(ObjectStoreConnector):
         config: ConnectorConfig,
         credential: StorableSecret | None,
         *,
-        etag: str | None,
-    ) -> None:
-        """The listed version, or a `412 PreconditionFailed` that fails the file.
+        size: int | None,
+    ) -> str | None:
+        """One `GetObject` for a small object, the managed transfer for the rest.
 
-        With an `ETag`, a conditional `GetObject` rather than the managed
-        transfer, because `download_file` takes no `IfMatch`. An object changed
-        since the listing is then refused by S3 itself, with no window between
-        a check and the read, and the next run lists its new `ETag`. Without
-        one, the managed transfer as before.
+        A small object is one request, so its `ETag` arrives with the bytes it
+        describes, and the full-object checksum botocore checks on a whole
+        `GetObject` still applies. A large or unsized one goes through
+        s3transfer, which reads it in parallel ranges with retries and pins
+        every range to one `ETag` with `IfMatch`: the `ETag` it reports is then
+        the bytes' own. Neither read is conditional on the listed `ETag`, so
+        `full` reads whatever the object is now.
+
+        A pinned transfer that is refused, or that received fewer bytes than the
+        object holds, asks the store once more before it says why: an object
+        replaced mid-download looks the same as a store or proxy that mishandles
+        `IfMatch`, and taken for the first, the second would skip the file on
+        every run while the sync reported success. s3transfer turns S3's
+        `PreconditionFailed` into `S3DownloadFailedError`, but not a store that
+        names the code "412", as Garage does, so a raw `ClientError` is checked
+        by its status.
+
+        Raises:
+            ChangedSinceListing: the object changed, or went, during the transfer.
+            ExternalServiceError: the store refused a read pinned to its own
+                current `ETag`, or sent fewer bytes than it says the object holds.
         """
+        # Imported here for the reason `_get_s3_client` gives (#2225).
+        from boto3.s3.transfer import TransferConfig
+        from botocore.exceptions import ClientError
+        from s3transfer.exceptions import S3DownloadFailedError
+        from s3transfer.manager import TransferManager
+
         client = self._get_s3_client(config, credential)
-        if etag is None:
-            client.download_file(container, key, str(dest_path))
-            return
-        body = client.get_object(Bucket=container, Key=key, IfMatch=etag)["Body"]
-        with closing(body), dest_path.open("wb") as out:
-            shutil.copyfileobj(body, out, 1024 * 1024)
+        transfer = TransferConfig()
+        if size is not None and size < transfer.multipart_threshold:
+            return self._get_whole(
+                client,
+                container,
+                key,
+                dest_path,
+                attempts=transfer.num_download_attempts,
+                chunk_size=transfer.io_chunksize,
+            )
+        name = Path(key).name
+        received = _Received()
+        future = None
+        try:
+            # A threshold of one byte, so every read is ranged and pinned:
+            # s3transfer reads an object under its threshold in one `GetObject`
+            # without `IfMatch` and still reports its HEAD's `ETag`, and an object
+            # listed large, or listed with no size, may be small by now.
+            with TransferManager(client, TransferConfig(multipart_threshold=1)) as manager:
+                future = manager.download(container, key, str(dest_path), subscribers=[received])
+                future.result()
+        except (S3DownloadFailedError, ClientError) as exc:
+            # A 404 too: a pinned read of an object deleted since is answered
+            # `NoSuchKey`, not 412, and so is the transfer's own HEAD when the
+            # object went before it began.
+            refused = isinstance(exc, S3DownloadFailedError) or (
+                exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") in (404, 412)
+            )
+            if not refused:
+                raise
+            pinned = future.meta.etag if future is not None else None
+            raise self._unread(
+                client,
+                container,
+                key,
+                pinned,
+                f"The store refused a read of {name} pinned to its own current ETag.",
+            ) from exc
+        # s3transfer writes a range the store answers with 416 as nothing and
+        # raises no error, so a store that checks the range before `IfMatch`
+        # leaves a short file, or a hole of zeros where a middle range was.
+        # Stored under the `ETag` the transfer began with, it would be skipped
+        # for good once that version came back.
+        expected = future.meta.size
+        if expected is not None and received.bytes != expected:
+            raise self._unread(
+                client,
+                container,
+                key,
+                future.meta.etag,
+                f"The store sent {received.bytes} of the {expected} bytes {name} holds.",
+            )
+        return future.meta.etag or None
+
+    @staticmethod
+    def _get_whole(
+        client: BaseClient,
+        container: str,
+        key: str,
+        dest_path: Path,
+        *,
+        attempts: int,
+        chunk_size: int,
+    ) -> str | None:
+        """One `GetObject`, retried as s3transfer retries a read, answering its `ETag`.
+
+        botocore retries a request only until its headers arrive, and a body
+        that stops halfway - a read timeout, a dropped connection - would fail
+        the file where the managed transfer used to try again. Each attempt is
+        a whole response, written from the start of the file, so the `ETag`
+        returned is the bytes' own.
+
+        Raises:
+            ChangedSinceListing: the object was deleted after it was listed.
+        """
+        from botocore.exceptions import ClientError
+        from s3transfer.utils import S3_RETRYABLE_DOWNLOAD_ERRORS
+
+        attempt = 1
+        while True:
+            try:
+                response = client.get_object(Bucket=container, Key=key)
+                with closing(response["Body"]) as body, dest_path.open("wb") as out:
+                    shutil.copyfileobj(body, out, chunk_size)
+                return response.get("ETag") or None
+            except ClientError as exc:
+                # Listed, and gone by the time it was read: the next listing
+                # leaves it out and the sync removes its document. Not
+                # `NoSuchBucket`, which is the source's own configuration.
+                if exc.response.get("Error", {}).get("Code") != "NoSuchKey":
+                    raise
+                raise ChangedSinceListing(
+                    f"{Path(key).name} was deleted before it was downloaded."
+                ) from exc
+            except S3_RETRYABLE_DOWNLOAD_ERRORS:
+                if attempt >= attempts:
+                    raise
+                logger.debug("Retrying the download of %s, attempt %d", key, attempt + 1)
+                attempt += 1
+
+    @staticmethod
+    def _unread(
+        client: BaseClient, container: str, key: str, pinned: str | None, refusal: str
+    ) -> ChangedSinceListing | ExternalServiceError:
+        """Why a pinned transfer did not deliver its version, asked of the store.
+
+        Moved when the object's `ETag` is no longer the pinned one, or the
+        object is gone. Otherwise the store failed a read of a version it still
+        holds, which is a failure for the sync to count and show, not a change.
+        """
+        from botocore.exceptions import ClientError
+
+        name = Path(key).name
+        try:
+            current = client.head_object(Bucket=container, Key=key).get("ETag")
+        except ClientError as exc:
+            if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+                raise
+            return ChangedSinceListing(f"{name} was deleted while it was downloaded.")
+        if pinned is not None and current != pinned:
+            return ChangedSinceListing(f"{name} changed while it was downloaded.")
+        return ExternalServiceError(message=refusal, details={"etag": pinned})

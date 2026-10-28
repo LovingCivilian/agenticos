@@ -113,7 +113,9 @@ and a connector overrides one when its source can answer the question it asks.
 each file reports a revision for each one instead, in `RemoteFile.revision`: the
 version the listing gives the file, such as an object's `ETag`. In `new_only` and
 `update_only`, the sync does not download a file whose listed revision equals the
-stored one. The default, `None`, keeps the download and the `content_hash` check.
+stored one. `_fetch` returns the revision of the bytes it wrote, and the sync
+stores that one. The default, `None`, keeps the download and the `content_hash`
+check.
 
 ## Step by step: a Notion connector
 
@@ -427,7 +429,7 @@ connectors (`GoogleDriveConfig`, `S3Config`, `WebConfig`) are the models to copy
 ## Tips
 
 - Set `RemoteFile.source_path` to a unique URI (e.g., `notion://page_id`) — this is used for deduplication across syncs, and it is what removal compares: a document whose `source_path` a complete listing no longer names is removed
-- Fill `RemoteFile.revision` from the listing, never from the downloaded bytes, because its purpose is to skip the download. If the value can miss a change, such as a size and a modification time, say so in the connector's docstring: `new_only` and `update_only` trust it, and a `full` run is the remedy. `_fetch` writes the bytes of the listed revision or raises, because the sync stores that revision with them. A skipped file never reaches `_fetch`. If `_fetch` refuses a file for a reason that does not change the revision, such as a robots.txt rule, check that reason in the listing too
+- Fill `RemoteFile.revision` from the listing, never from the downloaded bytes, because its purpose is to skip the download. If the value can miss a change, such as a size and a modification time, say so in the connector's docstring: `new_only` and `update_only` trust it, and a `full` run is the remedy. `_fetch` returns the revision of the bytes it wrote, or `None`, because the sync stores that one. Raise `ChangedSinceListing` if the file changed during the download. A skipped file never reaches `_fetch`. If `_fetch` refuses a file for a reason that does not change the revision, such as a robots.txt rule, check that reason in the listing too
 - Return `complete=False` from a listing that stopped short, and never raise for one you can still partly use
 - Use `asyncio.to_thread()` to wrap blocking SDK calls so they don't block the event loop
 - Implement `validate_config()` to refuse a config the wizard can still fix — a `ConfigRefusal` naming a `field` is what makes it mark that input rather than show a sentence over four of them. It sees the config and not the credential, so "can this key reach the service" is a question for the first sync, not for this method

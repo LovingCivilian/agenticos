@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.schemas.sync_source import SyncSourceCreate, SyncSourceUpdate
-from app.services.rag.connectors import RemoteFile, RemoteListing
+from app.services.rag.connectors import FetchedFile, RemoteFile, RemoteListing
 from app.services.rag.models import IngestionStatus
 from app.services.rag_document import RAGDocumentService
 from app.worker.tasks import rag_tasks
@@ -186,10 +186,10 @@ async def _connector_sync(
     which value two calls are handed.
     """
 
-    async def download(remote_file: RemoteFile, dest_dir: Path, **_: object) -> Path:
+    async def download(remote_file: RemoteFile, dest_dir: Path, **_: object) -> FetchedFile:
         dest = dest_dir / remote_file.name
         dest.write_bytes(b"the handbook")
-        return dest
+        return FetchedFile(path=dest, revision=None)
 
     connector = MagicMock(
         list_files=AsyncMock(
@@ -197,7 +197,7 @@ async def _connector_sync(
                 files=[RemoteFile(id="f1", name="handbook.md", source_path="gdrive://f1")]
             )
         ),
-        download_file=AsyncMock(side_effect=download),
+        fetch_file=AsyncMock(side_effect=download),
         remote_version=AsyncMock(return_value=None),
         aclose=AsyncMock(),
     )

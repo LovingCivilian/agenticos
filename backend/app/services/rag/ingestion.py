@@ -136,16 +136,18 @@ class IngestionService:
             collection_name, source_path=source_path, tenant=self._tenant
         )
 
-    async def restamp_revision(self, collection_name: str, document_id: str, revision: str) -> None:
-        """Record a connector's new `revision` on a stored document, in this tenant.
+    async def restamp_revision(
+        self, collection_name: str, document_id: str, revision: str, source_path: str
+    ) -> None:
+        """Record a connector's new `revision` on the document at `source_path`, in this tenant.
 
-        For a file whose listed revision changed while its bytes did not, so the
-        next sync skips its download. Unlike `existing_document`, a store
-        that refuses the write raises: the sync counts the file as failed rather
-        than reporting a skip that recorded nothing.
+        For a file whose revision changed while its bytes did not, so the next
+        sync skips its download. Unlike `existing_document`, a store that
+        refuses the write raises: the sync counts the file as failed rather than
+        reporting a skip that recorded nothing.
         """
         await self.store.restamp_document_revision(
-            collection_name, document_id, revision, tenant=self._tenant
+            collection_name, document_id, revision, source_path=source_path, tenant=self._tenant
         )
 
     async def ingest_file(

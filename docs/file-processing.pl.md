@@ -1,5 +1,5 @@
 ---
-source_sha: "e66a47ad9f01"
+source_sha: "44ff5be22dbe"
 ---
 
 # Przetwarzanie plików { #file-processing }
@@ -1135,11 +1135,12 @@ liczony jest jako **aktualizacja**, a nie ingestia, odczytywana z
 `replaced_document_id`, a nie z własnego zdania wyniku.
 
 Konektor może też podać rewizję każdego pliku w swoim listingu, w
-`RemoteFile.revision`. Taką rewizją jest `ETag` z S3. Synchronizacja zapisuje
-rewizję w metadanych wektorowych dokumentu, obok `content_hash`. W `new_only`
-i `update_only` synchronizacja pomija plik przed pobraniem, gdy jego rewizja
-z listingu jest równa zapisanej. Source nadal zgłasza roszczenie do pominiętego
-pliku, więc usuwanie go zostawia.
+`RemoteFile.revision`. Taką rewizją jest `ETag` z S3. Po pobraniu synchronizacja
+zapisuje rewizję odczytanych bajtów w metadanych wektorowych dokumentu, obok
+`content_hash`. W `new_only` i `update_only` synchronizacja pomija plik przed
+pobraniem, gdy jego rewizja z listingu jest równa zapisanej. Source nadal zgłasza
+roszczenie do pominiętego pliku, więc usuwanie go zostawia. Plik, który zmienia
+się w trakcie pobierania, też jest pomijany, a następna synchronizacja go odczyta.
 
 Gdy rewizja się zmieniła, a hash nie,
 synchronizacja wpisuje nową rewizję do zapisanego dokumentu i niczego nie
@@ -1391,10 +1392,15 @@ dostarcza klienta, `SCHEME` i to, które pole `CONFIG_MODEL` wskazuje kontener -
 `bucket` dla S3 i GCS, `container` dla Azure. `S3Connector` jest taką podklasą
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); jego dwa haki są
 celowo blokujące, bo blokujące są wszystkie trzy SDK, a wspólna klasa uruchamia
-je na wątku roboczym. Klient podaje `ETag` każdego obiektu w `StoredObject.etag`,
-a wspólne listowanie mapuje go na `RemoteFile.revision`. Pobranie prosi o ten
-`ETag`, więc obiekt zmieniony po listowaniu kończy się błędem i synchronizuje się
-przy następnym przebiegu.
+je na wątku roboczym.
+
+Klient podaje `ETag` każdego obiektu w `StoredObject.etag`, a wspólne listowanie
+mapuje go na `RemoteFile.revision`. Pobranie podaje `ETag` odczytanych bajtów.
+Duży obiekt jest czytany w zakresach przypiętych do jednego `ETag`, więc obiekt
+zmieniony między dwoma zakresami jest pomijany i odczytywany przy następnym
+przebiegu. Obiekt zmieniony poza API S3 magazynu, na przykład przez filer lub
+montowanie FUSE w SeaweedFS, może zachować stary `ETag`. Po takiej zmianie
+uruchom `full`.
 
 Trzy rzeczy nie są tanie, a konektor bez nich jest rachunkiem albo
 niespodzianką, a nie funkcją:

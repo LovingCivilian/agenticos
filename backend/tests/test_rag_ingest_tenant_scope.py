@@ -441,14 +441,20 @@ class TestARevisionRefreshIsScopedLikeADelete:
         execute = AsyncMock()
         store, session = self._store_over(execute)
 
-        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=ORG_A)
+        await store.restamp_document_revision(
+            "kb", "doc-1", '"etag-2"', source_path="s3://acme/a.pdf", tenant=ORG_A
+        )
 
         statement = str(execute.await_args.args[0])
         params = execute.await_args.args[1]
         assert statement.lstrip().startswith("UPDATE rag_kb")
-        assert "parent_doc_id = :doc_id AND (metadata->>'organization_id') = :org" in statement
+        assert (
+            "parent_doc_id = :doc_id AND metadata->>'source_path' = :source_path "
+            "AND (metadata->>'organization_id') = :org"
+        ) in statement
         assert "revision" in statement
         assert params["doc_id"] == "doc-1"
+        assert params["source_path"] == "s3://acme/a.pdf"
         assert params["org"] == str(ORG_A)
         # Bound, never interpolated: a revision is whatever the remote system says.
         assert '"etag-2"' in params.values()
@@ -459,17 +465,21 @@ class TestARevisionRefreshIsScopedLikeADelete:
         execute = AsyncMock()
         store, _session = self._store_over(execute)
 
-        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=None)
+        await store.restamp_document_revision(
+            "kb", "doc-1", '"etag-2"', source_path="s3://acme/a.pdf", tenant=None
+        )
 
         statement = str(execute.await_args.args[0])
-        assert "parent_doc_id = :doc_id AND (metadata->>'organization_id') IS NULL" in statement
+        assert "(metadata->>'organization_id') IS NULL" in statement
         assert "org" not in execute.await_args.args[1]
 
     async def test_the_document_id_is_sanitized_as_a_delete_sanitizes_it(self):
         execute = AsyncMock()
         store, _session = self._store_over(execute)
 
-        await store.restamp_document_revision("kb", 'doc-"1\\', '"etag-2"', tenant=ORG_A)
+        await store.restamp_document_revision(
+            "kb", 'doc-"1\\', '"etag-2"', source_path="s3://acme/a.pdf", tenant=ORG_A
+        )
 
         assert execute.await_args.args[1]["doc_id"] == "doc-1"
 
@@ -480,7 +490,9 @@ class TestARevisionRefreshIsScopedLikeADelete:
         store, session = self._store_over(execute)
         store._collection_exists = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=ORG_A)
+        await store.restamp_document_revision(
+            "kb", "doc-1", '"etag-2"', source_path="s3://acme/a.pdf", tenant=ORG_A
+        )
 
         execute.assert_not_awaited()
         session.commit.assert_not_awaited()

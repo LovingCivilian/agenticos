@@ -1,5 +1,5 @@
 ---
-source_sha: "15a149e19257"
+source_sha: "8caa477ddcbc"
 ---
 
 # Añade un sync connector { #add-a-sync-connector }
@@ -121,7 +121,8 @@ sobrescribe los dos, y también `SharePointConnector`, en
 describir cada archivo por separado informa en su lugar de una revisión para cada
 uno, en `RemoteFile.revision`: la versión que el listado da al archivo, como el
 `ETag` de un objeto. En `new_only` y `update_only`, el sync no descarga un archivo
-cuya revisión listada es igual a la guardada. El valor por defecto, `None`,
+cuya revisión listada es igual a la guardada. `_fetch` devuelve la revisión de
+los bytes que escribió, y el sync guarda esa. El valor por defecto, `None`,
 mantiene la descarga y la comprobación de `content_hash`.
 
 ## Paso a paso: un connector de Notion { #step-by-step-a-notion-connector }
@@ -439,7 +440,7 @@ los connectors que vienen incluidos (`GoogleDriveConfig`, `S3Config`,
 ## Consejos { #tips }
 
 - Pon en `RemoteFile.source_path` un URI único (por ejemplo, `notion://page_id`) — sirve para deduplicar entre syncs, y es lo que compara la eliminación: un documento cuyo `source_path` ya no nombra un listado completo se elimina
-- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio. `_fetch` escribe los bytes de la revisión del listado o lanza una excepción, porque la sincronización guarda esa revisión con ellos. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
+- Rellena `RemoteFile.revision` desde el listado, nunca desde los bytes descargados, porque su propósito es saltarse la descarga. Si el valor puede pasar por alto un cambio, como un tamaño y una hora de modificación, dilo en el docstring del connector: `new_only` y `update_only` confían en él, y una ejecución `full` es el remedio. `_fetch` devuelve la revisión de los bytes que escribió, o `None`, porque la sincronización guarda esa. Lanza `ChangedSinceListing` si el archivo cambió durante la descarga. Un archivo saltado nunca llega a `_fetch`. Si `_fetch` rechaza un archivo por un motivo que no cambia la revisión, como una regla de robots.txt, comprueba ese motivo también en el listado
 - Devuelve `complete=False` desde un listado que se quedó corto, y nunca lances una excepción por uno que todavía puedes usar en parte
 - Envuelve con `asyncio.to_thread()` las llamadas bloqueantes de un SDK para que no bloqueen el event loop
 - Implementa `validate_config()` para rechazar una configuración que el asistente todavía puede arreglar — una `ConfigRefusal` que nombra un `field` es lo que hace que marque ese campo de entrada en lugar de mostrar una frase sobre cuatro de ellos. Ve la configuración y no la credencial, así que "puede esta clave llegar al servicio" es una pregunta para el primer sync, no para este método

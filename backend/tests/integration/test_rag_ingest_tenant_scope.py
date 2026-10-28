@@ -241,7 +241,9 @@ async def test_org_a_cannot_refresh_the_revision_of_org_bs_document(engine: Asyn
     await store._ensure_collection(COLLECTION)
     await _insert(store, doc_id="doc-b", tenant=ORG_B, revision='"etag-1"')
 
-    await store.restamp_document_revision(COLLECTION, "doc-b", '"etag-2"', tenant=ORG_A)
+    await store.restamp_document_revision(
+        COLLECTION, "doc-b", '"etag-2"', source_path=SOURCE_PATH, tenant=ORG_A
+    )
 
     assert (await _metadata(store))["doc-b-0"]["revision"] == '"etag-1"'
 
@@ -266,7 +268,9 @@ async def test_a_refresh_changes_only_the_revision_on_every_chunk_of_one_documen
     )
     before = await _metadata(store)
 
-    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-2"', tenant=ORG_A)
+    await store.restamp_document_revision(
+        COLLECTION, "doc-a", '"etag-2"', source_path=SOURCE_PATH, tenant=ORG_A
+    )
 
     after = await _metadata(store)
     for row_id in ("doc-a-0", "doc-a-1"):
@@ -285,11 +289,30 @@ async def test_a_document_stored_before_revisions_gets_one(engine: AsyncEngine) 
     await store._ensure_collection(COLLECTION)
     await _insert(store, doc_id="doc-a", tenant=ORG_A)
 
-    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-1"', tenant=ORG_A)
+    await store.restamp_document_revision(
+        COLLECTION, "doc-a", '"etag-1"', source_path=SOURCE_PATH, tenant=ORG_A
+    )
 
     meta = (await _metadata(store))["doc-a-0"]
     assert meta["revision"] == '"etag-1"'
     assert (meta["content_hash"], meta["organization_id"]) == (CONTENT_HASH, str(ORG_A))
+
+
+async def test_a_refresh_for_another_address_leaves_the_document_alone(
+    engine: AsyncEngine,
+) -> None:
+    """The address is part of the write, not only of the caller's check: a
+    document whose own `source_path` is not the one the revision was read for
+    keeps what it has."""
+    store = _store(engine)
+    await store._ensure_collection(COLLECTION)
+    await _insert(store, doc_id="doc-a", tenant=ORG_A, revision='"etag-1"')
+
+    await store.restamp_document_revision(
+        COLLECTION, "doc-a", '"etag-2"', source_path="s3://acme/elsewhere.pdf", tenant=ORG_A
+    )
+
+    assert (await _metadata(store))["doc-a-0"]["revision"] == '"etag-1"'
 
 
 async def test_refreshing_in_a_collection_that_does_not_exist_is_a_no_op(
@@ -299,6 +322,8 @@ async def test_refreshing_in_a_collection_that_does_not_exist_is_a_no_op(
     error nor a table created by the refresh."""
     store = _store(engine)
 
-    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-1"', tenant=ORG_A)
+    await store.restamp_document_revision(
+        COLLECTION, "doc-a", '"etag-1"', source_path=SOURCE_PATH, tenant=ORG_A
+    )
 
     assert await store._collection_exists(COLLECTION) is False

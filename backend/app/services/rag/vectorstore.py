@@ -152,22 +152,30 @@ class BaseVectorStore(ABC):
 
     @abstractmethod
     async def restamp_document_revision(
-        self, collection_name: str, document_id: str, revision: str, tenant: UUID | None = None
+        self,
+        collection_name: str,
+        document_id: str,
+        revision: str,
+        *,
+        source_path: str,
+        tenant: UUID | None = None,
     ) -> None:
         """Write a connector's `revision` onto every chunk of one stored document.
 
-        Used by a connector sync when a file's listed revision changed but its
-        bytes hash to the stored `content_hash` - an object uploaded again with
+        Used by a connector sync when a file's revision changed but its bytes
+        hash to the stored `content_hash` - an object uploaded again with
         another part size, a file touched. Nothing is embedded again, but without
         the new revision the next run would download the file again, and every
         run after it. Every chunk, because the lookup may read any one of them,
         and only the `revision` key: no other metadata and no row changes.
 
-        Scoped to `tenant` as a delete is, because a document id alone reaches
-        every tenant's rows under it on a shared runtime table (#1684). `None`
-        matches only the untagged, deployment-wide rows. A missing table is a
-        no-op. A database error raises: unlike the lookup, a write that failed is
-        a failure, and the sync counts the file as one.
+        Only at `source_path`, the address the revision was read for: a document
+        stored under another address keeps what it has. Scoped to `tenant` as a
+        delete is, because a document id alone reaches every tenant's rows under
+        it on a shared runtime table (#1684). `None` matches only the untagged,
+        deployment-wide rows. A missing table is a no-op. A database error
+        raises: unlike the lookup, a write that failed is a failure, and the sync
+        counts the file as one.
         """
 
     @abstractmethod
@@ -1063,7 +1071,13 @@ class PgVectorStore(BaseVectorStore):
             await session.commit()
 
     async def restamp_document_revision(
-        self, collection_name: str, document_id: str, revision: str, tenant: UUID | None = None
+        self,
+        collection_name: str,
+        document_id: str,
+        revision: str,
+        *,
+        source_path: str,
+        tenant: UUID | None = None,
     ) -> None:
         """Set `metadata->>'revision'` on every row of one document, nothing else.
 
@@ -1074,6 +1088,13 @@ class PgVectorStore(BaseVectorStore):
         cannot infer a bound parameter's type from that. The id is sanitized as
         `delete_document` sanitizes it, and the `_org_filter(tenant)` conjunct
         confines the write to the rows the caller's tenant stamped (#1684).
+
+        The `source_path` conjunct is also what keeps this from a scan. There is
+        no index on `parent_doc_id`, and the tenant's hash index covers every
+        row the organization holds, so by id alone each refresh read the whole
+        collection - measured at 4 ms a document at 8,000 rows and 8 at 80,000,
+        which makes the first sync after an upgrade quadratic in the collection.
+        The address's hash index finds a document's rows directly.
         """
         if not await self._collection_exists(collection_name):
             return
@@ -1084,9 +1105,15 @@ class PgVectorStore(BaseVectorStore):
                 text(
                     f"UPDATE {table} SET metadata = metadata || "
                     "jsonb_build_object('revision', CAST(:revision AS text)) "
-                    f"WHERE parent_doc_id = :doc_id AND {org_clause}"
+                    "WHERE parent_doc_id = :doc_id AND metadata->>'source_path' = :source_path "
+                    f"AND {org_clause}"
                 ),
-                {"revision": revision, "doc_id": self._sanitize_id(document_id), **org_params},
+                {
+                    "revision": revision,
+                    "doc_id": self._sanitize_id(document_id),
+                    "source_path": source_path,
+                    **org_params,
+                },
             )
             await session.commit()
 

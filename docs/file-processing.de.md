@@ -1,5 +1,5 @@
 ---
-source_sha: "e66a47ad9f01"
+source_sha: "44ff5be22dbe"
 ---
 
 # Dateiverarbeitung { #file-processing }
@@ -1203,12 +1203,14 @@ ist die Antwort, die nichts später korrigiert. Eine ersetzte Datei wird als
 `replaced_document_id` statt am eigenen Satz des Ergebnisses.
 
 Ein Connector kann in seiner Auflistung außerdem für jede Datei eine Revision
-melden, in `RemoteFile.revision`. Ein S3-`ETag` ist eine solche. Der Sync
-speichert die Revision in den Vektor-Metadaten des Dokuments, neben
-`content_hash`. In `new_only` und `update_only` überspringt der Sync eine Datei
-vor dem Download, wenn ihre aufgelistete Revision der gespeicherten gleicht. Die
-Source beansprucht die übersprungene Datei weiterhin, das Entfernen behält sie
-also.
+melden, in `RemoteFile.revision`. Ein S3-`ETag` ist eine solche. Nach einem
+Download speichert der Sync die Revision der gelesenen Bytes in den
+Vektor-Metadaten des Dokuments, neben `content_hash`. In `new_only` und
+`update_only` überspringt der Sync eine Datei vor dem Download, wenn ihre
+aufgelistete Revision der gespeicherten gleicht. Die Source beansprucht die
+übersprungene Datei weiterhin, das Entfernen behält sie also. Eine Datei, die sich
+während ihres Downloads ändert, wird ebenfalls übersprungen, und der nächste Sync
+liest sie.
 
 Hat sich die Revision geändert und der Hash nicht, schreibt der Sync die
 neue Revision in das gespeicherte Dokument und bettet nichts ein. Ein ohne
@@ -1477,11 +1479,16 @@ und eine Unterklasse liefert einen Client, ein `SCHEME` und die Angabe, welches
 Azure. `S3Connector` ist diese Unterklasse
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); seine beiden Hooks
 sind bewusst blockierend, denn alle drei SDKs sind es, und die gemeinsame Klasse
-führt sie auf einem Worker-Thread aus. Ein Client meldet das `ETag` jedes Objekts
-in `StoredObject.etag`, und die gemeinsame Auflistung bildet es auf
-`RemoteFile.revision` ab. Der Download fordert genau dieses `ETag` an. Ein seit
-der Auflistung geändertes Objekt schlägt daher fehl und wird beim nächsten Lauf
-synchronisiert.
+führt sie auf einem Worker-Thread aus.
+
+Ein Client meldet das `ETag` jedes Objekts in `StoredObject.etag`, und die
+gemeinsame Auflistung bildet es auf `RemoteFile.revision` ab. Der Download meldet
+das `ETag` der gelesenen Bytes. Ein großes Objekt wird in Bereichen gelesen, die
+an ein `ETag` gebunden sind. Ein Objekt, das sich zwischen zwei Bereichen ändert,
+wird daher übersprungen und beim nächsten Lauf gelesen. Ein Objekt, das außerhalb
+der S3-API des Speichers geändert wird, etwa über einen SeaweedFS-Filer oder einen
+FUSE-Mount, kann sein altes `ETag` behalten. Führen Sie nach einer solchen
+Änderung `full` aus.
 
 Drei Dinge sind nicht günstig, und ein Connector ohne sie ist eine Rechnung oder
 eine Überraschung statt einer Funktion:

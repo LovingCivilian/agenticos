@@ -1,5 +1,5 @@
 ---
-source_sha: "e66a47ad9f01"
+source_sha: "44ff5be22dbe"
 ---
 
 # Procesamiento de archivos { #file-processing }
@@ -1151,11 +1151,13 @@ sustituido se cuenta como **actualización** y no como ingesta, leído de
 `replaced_document_id` y no de la frase que devuelve el resultado.
 
 Un conector también puede informar de una revisión para cada archivo de su
-listado, en `RemoteFile.revision`. Un `ETag` de S3 es una. La sincronización
-guarda la revisión en los metadatos vectoriales del documento, junto a
-`content_hash`. En `new_only` y `update_only`, la sincronización omite un archivo
-antes de la descarga cuando su revisión listada es igual a la guardada. La fuente
-sigue reclamando el archivo omitido, así que la eliminación lo conserva.
+listado, en `RemoteFile.revision`. Un `ETag` de S3 es una. Tras una descarga, la
+sincronización guarda la revisión de los bytes leídos en los metadatos vectoriales
+del documento, junto a `content_hash`. En `new_only` y `update_only`, la
+sincronización omite un archivo antes de la descarga cuando su revisión listada es
+igual a la guardada. La fuente sigue reclamando el archivo omitido, así que la
+eliminación lo conserva. Un archivo que cambia durante su descarga también se
+omite, y la siguiente sincronización lo lee.
 
 Cuando la
 revisión ha cambiado y el hash no, la sincronización escribe la nueva revisión en
@@ -1412,10 +1414,15 @@ directorio, y una subclase aporta un cliente, un `SCHEME` y qué campo del
 Azure. `S3Connector` es esa subclase
 ([#988](https://github.com/vstorm-co/agenticos/issues/988)); sus dos hooks son
 bloqueantes a propósito, porque los tres SDK lo son, y la clase compartida los
-ejecuta en un hilo de worker. Un cliente informa del `ETag` de cada objeto en
-`StoredObject.etag`, y el listado compartido lo asigna a `RemoteFile.revision`.
-La descarga pide ese `ETag`, así que un objeto cambiado desde el listado falla y
-se sincroniza en la siguiente ejecución.
+ejecuta en un hilo de worker.
+
+Un cliente informa del `ETag` de cada objeto en `StoredObject.etag`, y el listado
+compartido lo asigna a `RemoteFile.revision`. La descarga informa del `ETag` de
+los bytes leídos. Un objeto grande se lee en rangos fijados a un solo `ETag`, así
+que un objeto que cambia entre dos rangos se omite y se lee en la siguiente
+ejecución. Un objeto cambiado fuera de la API S3 del almacén, por ejemplo con un
+filer o un montaje FUSE de SeaweedFS, puede conservar su `ETag` antiguo. Ejecuta
+`full` después de un cambio así.
 
 Hay tres cosas que no son baratas, y un conector sin ellas es una factura o una
 sorpresa en vez de una funcionalidad:

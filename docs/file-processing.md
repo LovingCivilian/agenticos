@@ -1068,11 +1068,12 @@ rather than an ingestion, read off `replaced_document_id` rather than off the
 result's own sentence.
 
 A connector can also report a revision for each file in its listing, in
-`RemoteFile.revision`. An S3 `ETag` is one. The sync stores the revision in the
-document's vector metadata, next to `content_hash`. In `new_only` and
-`update_only`, the sync skips a file before the download when its listed revision
-equals the stored one. The source still claims the skipped file, so removal keeps
-it.
+`RemoteFile.revision`. An S3 `ETag` is one. After a download, the sync stores the
+revision of the bytes it read in the document's vector metadata, next to
+`content_hash`. In `new_only` and `update_only`, the sync skips a file before the
+download when its listed revision equals the stored one. The source still claims
+the skipped file, so removal keeps it. A file that changes during its download is
+skipped too, and the next sync reads it.
 
 When the revision changed and the hash did not, the sync writes the new
 revision to the stored document and embeds nothing. A document stored with no
@@ -1309,10 +1310,14 @@ address and the directory-marker skip, and a subclass supplies a client, a
 GCS, `container` for Azure. `S3Connector`
 is that subclass ([#988](https://github.com/vstorm-co/agenticos/issues/988)); its
 two hooks are deliberately blocking, because all three SDKs are, and the shared
-class runs them on a worker thread. A client reports each object's `ETag` in
-`StoredObject.etag`, and the shared listing maps it to `RemoteFile.revision`.
-The download asks for that `ETag`, so an object changed since the listing fails
-and syncs on the next run.
+class runs them on a worker thread.
+
+A client reports each object's `ETag` in `StoredObject.etag`, and the shared
+listing maps it to `RemoteFile.revision`. The download reports the `ETag` of the
+bytes it read. A large object is read in ranges pinned to one `ETag`, so an object
+that changes between two ranges is skipped and read on the next run. An object
+changed outside the store's S3 API, for example through a SeaweedFS filer or FUSE
+mount, can keep its old `ETag`. Run `full` after such a change.
 
 Three things are not cheap, and a connector without them is a bill or a surprise
 rather than a feature:

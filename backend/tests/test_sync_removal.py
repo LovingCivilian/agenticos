@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.exceptions import BadRequestError
-from app.services.rag.connectors import RemoteFile, RemoteListing, WithdrawnFile
+from app.services.rag.connectors import FetchedFile, RemoteFile, RemoteListing, WithdrawnFile
 from app.services.rag.models import IngestionStatus
 from app.worker.tasks import rag_tasks
 
@@ -39,12 +39,12 @@ def _row(source_path: str, vector_document_id: str | None = "vec-gone") -> Magic
 def _connector(
     listing: RemoteListing | Exception, *, withdrawn: frozenset[str] = frozenset()
 ) -> MagicMock:
-    async def download(remote_file: RemoteFile, dest_dir: Path, **_: Any) -> Path:
+    async def download(remote_file: RemoteFile, dest_dir: Path, **_: Any) -> FetchedFile:
         if remote_file.source_path in withdrawn:
             raise WithdrawnFile(f"{remote_file.name} asks not to be indexed.")
         dest = dest_dir / remote_file.name
         dest.write_bytes(b"the page")
-        return dest
+        return FetchedFile(path=dest, revision=None)
 
     listed = (
         AsyncMock(side_effect=listing)
@@ -53,7 +53,7 @@ def _connector(
     )
     return MagicMock(
         list_files=listed,
-        download_file=AsyncMock(side_effect=download),
+        fetch_file=AsyncMock(side_effect=download),
         # The base's answers: no version to stop early on, nothing to release.
         remote_version=AsyncMock(return_value=None),
         aclose=AsyncMock(),
