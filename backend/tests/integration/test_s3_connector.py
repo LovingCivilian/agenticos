@@ -438,6 +438,28 @@ async def test_a_key_the_store_lists_but_cannot_read_fails_the_file(
         )
 
 
+@pytest.mark.parametrize("name", ["a+b.md", "c d.md", "e%41.md"], ids=["plus", "space", "percent"])
+async def test_a_key_with_url_characters_lists_and_reads_as_itself(
+    bucket: str, prefix: str, tmp_path: Path, name: str
+) -> None:
+    """botocore decodes a listed key when the store says it encoded it. A store
+    that says so and did not would list `a+b.md` as `a b.md`: a read of that
+    name and a listing of it both find nothing, and the file would be skipped
+    as deleted on every run. Each store the suite runs on must hand back the
+    key it holds."""
+    key = f"{prefix}{name}"
+    _client().put_object(Bucket=bucket, Key=key, Body=b"url characters")
+
+    listed = await _listed(bucket, prefix)
+    fetched = await S3Connector().fetch_file(
+        listed[key], tmp_path, config=_config(bucket, prefix), credential=_credential()
+    )
+
+    assert list(listed) == [key]
+    assert fetched.path.read_bytes() == b"url characters"
+    assert fetched.revision == listed[key].revision
+
+
 class _BreaksOff:
     """A response body that times out once, after `after` bytes."""
 
