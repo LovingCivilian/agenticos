@@ -540,6 +540,19 @@ class TestTheS3ConnectorStillListsWhatItListed:
         with pytest.raises(ExternalServiceError, match="refused a read"):
             await self._fetch_through(tmp_path, self._store_now_at('"pinned-etag-3"'), fails=error)
 
+    async def test_a_head_with_no_etag_is_no_evidence_of_a_move(self, tmp_path: Path):
+        """A store whose HEAD sends no `ETag`, after a refused pinned read. Read
+        as a change, the file would be skipped on every run while the sync
+        reported success. With nothing to compare, it is a failure."""
+        client = MagicMock()
+        client.head_object.return_value = {}
+        with pytest.raises(ExternalServiceError, match="refused a read"):
+            await self._fetch_through(
+                tmp_path,
+                client,
+                fails=S3DownloadFailedError('Contents of stored object "legal/nda.pdf"'),
+            )
+
     _ABSENT = (
         # A pinned range of a deleted object, as S3 and MinIO answer it.
         pytest.param(

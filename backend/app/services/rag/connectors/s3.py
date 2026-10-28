@@ -369,7 +369,8 @@ class S3Connector(ObjectStoreConnector):
                 message=f"The store lists {name}, but answers that it does not exist.",
                 details={"etag": pinned},
             )
-        if pinned is not None and current != pinned:
+        # A HEAD with no `ETag` says nothing about a move, so it is no evidence.
+        if pinned is not None and current is not None and current != pinned:
             return ChangedSinceListing(f"{name} changed while it was downloaded.")
         return ExternalServiceError(message=refusal, details={"etag": pinned})
 
