@@ -1,5 +1,5 @@
 ---
-source_sha: "37ea49d969bd"
+source_sha: "522aee0f8ac1"
 ---
 
 # Configura las fuentes de sincronización { #configure-sync-sources }
@@ -706,7 +706,7 @@ Cada sincronización crea una entrada de `SyncLog` con estos campos:
 | `skipped` | Omitidos (ya presentes o sin cambios) |
 | `failed` | No se pudieron ingestar, incluidas las páginas o archivos que el listado no pudo leer y los documentos que no se pudieron eliminar |
 | `removed` | Eliminados porque la fuente ya no los lista (consulta [qué elimina una sincronización](#what-a-sync-removes)) |
-| `error_message` | Qué salió mal, o por qué no se eliminó nada. Un run puede estar en `done` y aun así tener un mensaje, por ejemplo cuando un crawl se detuvo en su límite de páginas |
+| `error_message` | Qué salió mal, o por qué no se eliminó nada. Un run puede estar en `done` y aun así tener un mensaje, por ejemplo cuando un crawl se detuvo en su límite de páginas, o cuando algunos archivos cambiaron durante el run y el siguiente run los sincroniza. Lee `status` para saber si el run falló |
 | `started_at` | Cuándo empezó la sincronización |
 | `completed_at` | Cuándo terminó la sincronización |
 

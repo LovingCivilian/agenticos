@@ -675,7 +675,7 @@ Every sync creates a `SyncLog` entry with the following fields:
 | `skipped` | Skipped (already present or unchanged) |
 | `failed` | Failed to ingest, including pages or files the listing could not read, and documents that could not be removed |
 | `removed` | Removed because the source no longer lists them (see [what a sync removes](#what-a-sync-removes)) |
-| `error_message` | What went wrong, or why nothing was removed. A run can be `done` and still have a message, for example when a crawl stopped at its page limit |
+| `error_message` | What went wrong, or why nothing was removed. A run can be `done` and still have a message, for example when a crawl stopped at its page limit, or when files changed during the run and the next run syncs them. Read `status` to know if the run failed |
 | `started_at` | When the sync started |
 | `completed_at` | When the sync finished |
 
