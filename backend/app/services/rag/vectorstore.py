@@ -400,12 +400,12 @@ class BaseVectorStore(ABC):
                     "filesize": metadata.get("filesize"),
                     "filetype": metadata.get("filetype"),
                     "additional_info": {
-                        "source_path": metadata.get("source_path", ""),
-                        "content_hash": metadata.get("content_hash", ""),
                         **(metadata.get("additional_info") or {}),
                         # After the parser's own keys, not before: a parser key
-                        # named `revision`, read as the connector's revision,
-                        # would decide whether a file is downloaded.
+                        # with one of these names, read as the document's own,
+                        # would decide whether a file is downloaded or skipped.
+                        "source_path": metadata.get("source_path", ""),
+                        "content_hash": metadata.get("content_hash", ""),
                         "revision": metadata.get("revision"),
                     },
                     "chunk_count": 0,

@@ -253,6 +253,34 @@ class TestTheRevisionTravelsWithTheDocument:
         assert existing.document_id == "doc-a"
         assert existing.revision is None
 
+    async def test_a_parsers_address_and_hash_keys_are_not_the_documents(self):
+        """As for `revision`: the address rule and the hash skip read these
+        keys, so a parser key of the same name must not stand in for the
+        document's own."""
+        execute = AsyncMock(
+            return_value=MagicMock(
+                fetchone=MagicMock(
+                    return_value=(
+                        "doc-a",
+                        {
+                            "source_path": "s3://acme/handbook.docx",
+                            "content_hash": "h",
+                            "additional_info": {
+                                "source_path": "s3://acme/elsewhere.docx",
+                                "content_hash": "parser",
+                            },
+                        },
+                    )
+                )
+            )
+        )
+        store = TestTheIndexedLookupIssuesOneStatementPerKey._store_over(execute)
+        service = IngestionService(processor=MagicMock(), vector_store=store)
+
+        existing = await service.existing_document("kb", "s3://acme/handbook.docx")
+
+        assert (existing.source_path, existing.content_hash) == ("s3://acme/handbook.docx", "h")
+
     async def test_the_files_revision_wins_over_a_parsers_key_of_the_same_name(self):
         execute = AsyncMock(
             return_value=MagicMock(
