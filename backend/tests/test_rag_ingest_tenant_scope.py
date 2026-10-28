@@ -420,6 +420,72 @@ class TestPgVectorStoreScopesEveryRowOp:
         assert info.total_vectors == 2
 
 
+class TestARevisionRefreshIsScopedLikeADelete:
+    """`restamp_document_revision` writes by document id, which is unique per
+    tenant and not across them: on a shared runtime table the id alone reaches
+    another organization's rows under the same id (#1684, #28)."""
+
+    @staticmethod
+    def _store_over(execute: AsyncMock) -> tuple[PgVectorStore, MagicMock]:
+        session = MagicMock(execute=execute, commit=AsyncMock())
+        session_ctx = MagicMock()
+        session_ctx.__aenter__ = AsyncMock(return_value=session)
+        session_ctx.__aexit__ = AsyncMock(return_value=False)
+        store = PgVectorStore.__new__(PgVectorStore)
+        store.async_session = MagicMock(return_value=session_ctx)
+        store._collection_exists = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        store._table = MagicMock(return_value="rag_kb")  # type: ignore[method-assign]
+        return store, session
+
+    async def test_the_update_names_one_document_in_the_tenants_rows(self):
+        execute = AsyncMock()
+        store, session = self._store_over(execute)
+
+        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=ORG_A)
+
+        statement = str(execute.await_args.args[0])
+        params = execute.await_args.args[1]
+        assert statement.lstrip().startswith("UPDATE rag_kb")
+        assert "parent_doc_id = :doc_id AND (metadata->>'organization_id') = :org" in statement
+        assert "revision" in statement
+        assert params["doc_id"] == "doc-1"
+        assert params["org"] == str(ORG_A)
+        # Bound, never interpolated: a revision is whatever the remote system says.
+        assert '"etag-2"' in params.values()
+        assert '"etag-2"' not in statement
+        session.commit.assert_awaited_once()
+
+    async def test_a_deployment_wide_refresh_reaches_only_untagged_rows(self):
+        execute = AsyncMock()
+        store, _session = self._store_over(execute)
+
+        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=None)
+
+        statement = str(execute.await_args.args[0])
+        assert "parent_doc_id = :doc_id AND (metadata->>'organization_id') IS NULL" in statement
+        assert "org" not in execute.await_args.args[1]
+
+    async def test_the_document_id_is_sanitized_as_a_delete_sanitizes_it(self):
+        execute = AsyncMock()
+        store, _session = self._store_over(execute)
+
+        await store.restamp_document_revision("kb", 'doc-"1\\', '"etag-2"', tenant=ORG_A)
+
+        assert execute.await_args.args[1]["doc_id"] == "doc-1"
+
+    async def test_a_collection_that_does_not_exist_is_left_alone(self):
+        """A source whose collection was dropped mid-run must not fail on, or
+        create, a table that is gone."""
+        execute = AsyncMock()
+        store, session = self._store_over(execute)
+        store._collection_exists = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        await store.restamp_document_revision("kb", "doc-1", '"etag-2"', tenant=ORG_A)
+
+        execute.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+
 class TestInsertStampsTheTenantIntoTheStatementParams:
     """`insert_document` renders the tenant into the JSON metadata parameter it
     binds, which is what the scoped reads later match on."""

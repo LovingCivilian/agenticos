@@ -68,6 +68,8 @@ async def _insert(
     filename: str = "handbook.pdf",
     content_hash: str = CONTENT_HASH,
     embedding: str = "[0.1,0.2,0.3]",
+    chunk: int = 0,
+    revision: str | None = None,
 ) -> None:
     meta: dict[str, str] = {
         "source_path": source_path,
@@ -76,6 +78,8 @@ async def _insert(
     }
     if tenant is not None:
         meta["organization_id"] = str(tenant)
+    if revision is not None:
+        meta["revision"] = revision
     insert = (
         f"INSERT INTO {TABLE} (id, parent_doc_id, content, embedding, metadata) "  # noqa: S608
         "VALUES (:id, :pid, :content, CAST(:emb AS vector), CAST(:meta AS jsonb))"
@@ -84,7 +88,7 @@ async def _insert(
         await session.execute(
             text(insert),
             {
-                "id": f"{doc_id}-0",
+                "id": f"{doc_id}-{chunk}",
                 "pid": doc_id,
                 "content": f"content of {doc_id}",
                 "emb": embedding,
@@ -98,6 +102,17 @@ async def _parent_ids(store: PgVectorStore) -> set[str]:
     async with store.async_session() as session:
         result: Result = await session.execute(text(f"SELECT parent_doc_id FROM {TABLE}"))  # noqa: S608
         return {row[0] for row in result.fetchall()}
+
+
+async def _metadata(store: PgVectorStore) -> dict[str, dict[str, str]]:
+    """Every row's metadata, by row id - decoded as `_first_document` decodes it,
+    because the driver may hand JSONB back as text."""
+    async with store.async_session() as session:
+        result: Result = await session.execute(text(f"SELECT id, metadata FROM {TABLE}"))  # noqa: S608
+        return {
+            row[0]: row[1] if isinstance(row[1], dict) else json.loads(row[1])
+            for row in result.fetchall()
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -217,3 +232,73 @@ async def test_a_deployment_wide_collection_sees_only_untagged_rows(engine: Asyn
 
     assert hit is not None and hit.document_id == "doc-none"
     assert [d.document_id for d in docs] == ["doc-none"]
+
+
+async def test_org_a_cannot_refresh_the_revision_of_org_bs_document(engine: AsyncEngine) -> None:
+    """Even naming Org B's own vector id: the refresh is a write by id, and on a
+    shared table the id alone reaches every tenant's rows under it (#28)."""
+    store = _store(engine)
+    await store._ensure_collection(COLLECTION)
+    await _insert(store, doc_id="doc-b", tenant=ORG_B, revision='"etag-1"')
+
+    await store.restamp_document_revision(COLLECTION, "doc-b", '"etag-2"', tenant=ORG_A)
+
+    assert (await _metadata(store))["doc-b-0"]["revision"] == '"etag-1"'
+
+
+async def test_a_refresh_changes_only_the_revision_on_every_chunk_of_one_document(
+    engine: AsyncEngine,
+) -> None:
+    """Every chunk, because the lookup may read any one of them; only the
+    revision, because the hash and the address are what the next run matches."""
+    store = _store(engine)
+    await store._ensure_collection(COLLECTION)
+    await _insert(store, doc_id="doc-a", tenant=ORG_A, revision='"etag-1"', chunk=0)
+    await _insert(store, doc_id="doc-a", tenant=ORG_A, revision='"etag-1"', chunk=1)
+    await _insert(
+        store,
+        doc_id="doc-other",
+        tenant=ORG_A,
+        source_path="/srv/sync/other.pdf",
+        filename="other.pdf",
+        content_hash="hash-other",
+        revision='"etag-1"',
+    )
+    before = await _metadata(store)
+
+    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-2"', tenant=ORG_A)
+
+    after = await _metadata(store)
+    for row_id in ("doc-a-0", "doc-a-1"):
+        assert after[row_id] == {**before[row_id], "revision": '"etag-2"'}
+    assert after["doc-other-0"] == before["doc-other-0"]
+    hit = await store.find_existing_document(
+        COLLECTION, source_path=SOURCE_PATH, content_hash=CONTENT_HASH, tenant=ORG_A
+    )
+    assert hit is not None and hit.additional_info is not None
+    assert (hit.document_id, hit.additional_info["revision"]) == ("doc-a", '"etag-2"')
+
+
+async def test_a_document_stored_before_revisions_gets_one(engine: AsyncEngine) -> None:
+    """The first sync after the upgrade: the stored row has no `revision` key."""
+    store = _store(engine)
+    await store._ensure_collection(COLLECTION)
+    await _insert(store, doc_id="doc-a", tenant=ORG_A)
+
+    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-1"', tenant=ORG_A)
+
+    meta = (await _metadata(store))["doc-a-0"]
+    assert meta["revision"] == '"etag-1"'
+    assert (meta["content_hash"], meta["organization_id"]) == (CONTENT_HASH, str(ORG_A))
+
+
+async def test_refreshing_in_a_collection_that_does_not_exist_is_a_no_op(
+    engine: AsyncEngine,
+) -> None:
+    """No table: the sync's collection was dropped while it ran. Neither an
+    error nor a table created by the refresh."""
+    store = _store(engine)
+
+    await store.restamp_document_revision(COLLECTION, "doc-a", '"etag-1"', tenant=ORG_A)
+
+    assert await store._collection_exists(COLLECTION) is False

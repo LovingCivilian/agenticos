@@ -19,6 +19,7 @@ This module is template-inherited and outside the coverage gate, which is why
 the precedence is pinned by name rather than trusted to a percentage.
 """
 
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,12 +60,21 @@ def _service(docs: list[DocumentInfo]) -> IngestionService:
 
 
 def _doc(
-    document_id: str, *, filename: str, source_path: str = "", content_hash: str = ""
+    document_id: str,
+    *,
+    filename: str,
+    source_path: str = "",
+    content_hash: str = "",
+    revision: str | None = None,
 ) -> DocumentInfo:
     return DocumentInfo(
         document_id=document_id,
         filename=filename,
-        additional_info={"source_path": source_path, "content_hash": content_hash},
+        additional_info={
+            "source_path": source_path,
+            "content_hash": content_hash,
+            "revision": revision,
+        },
     )
 
 
@@ -157,6 +167,183 @@ class TestOnePrecedenceForBothAnswers:
         existing = await service.existing_document("kb", "/srv/sync/handbook.pdf")
 
         assert existing == StoredDocument(document_id="doc-a", content_hash=None)
+
+
+class TestTheRevisionTravelsWithTheDocument:
+    """A connector's revision is a third fact about the stored document (#28),
+    returned with the id and the hash for the reason those two are returned
+    together: a sync that compared a listed revision against another document's
+    would skip a download on the strength of the wrong file (#548)."""
+
+    async def test_the_revision_comes_with_the_id_and_the_hash_of_one_document(self):
+        service = _service(
+            [
+                _doc(
+                    "doc-a",
+                    filename="handbook.pdf",
+                    source_path="/old/handbook.pdf",
+                    content_hash="hash-a",
+                    revision='"etag-a"',
+                ),
+                _doc(
+                    "doc-b",
+                    filename="handbook.pdf",
+                    source_path="s3://acme/handbook.pdf",
+                    content_hash="hash-b",
+                    revision='"etag-b"',
+                ),
+            ]
+        )
+
+        existing = await service.existing_document("kb", "s3://acme/handbook.pdf")
+
+        assert existing == StoredDocument(
+            document_id="doc-b", content_hash="hash-b", revision='"etag-b"'
+        )
+
+    async def test_a_document_stored_without_a_revision_answers_none(self):
+        """Every document synced before #28, and every upload and local sync."""
+        service = _service(
+            [
+                _doc(
+                    "doc-a",
+                    filename="handbook.pdf",
+                    source_path="s3://acme/handbook.pdf",
+                    content_hash="hash-a",
+                )
+            ]
+        )
+
+        existing = await service.existing_document("kb", "s3://acme/handbook.pdf")
+
+        assert existing.document_id == "doc-a"
+        assert existing.revision is None
+
+    async def test_a_parsers_own_revision_key_is_not_the_files_revision(self):
+        """A parser's nested `additional_info` is spread into what the lookup
+        returns - a DOCX's core properties include a `revision` counter. Read as
+        the connector's revision, a document property would decide whether a
+        file is downloaded."""
+        execute = AsyncMock(
+            return_value=MagicMock(
+                fetchone=MagicMock(
+                    return_value=(
+                        "doc-a",
+                        {
+                            "source_path": "s3://acme/handbook.docx",
+                            "content_hash": "h",
+                            "additional_info": {"revision": "7"},
+                        },
+                    )
+                )
+            )
+        )
+        store = TestTheIndexedLookupIssuesOneStatementPerKey._store_over(execute)
+        service = IngestionService(processor=MagicMock(), vector_store=store)
+
+        existing = await service.existing_document("kb", "s3://acme/handbook.docx")
+
+        assert existing.document_id == "doc-a"
+        assert existing.revision is None
+
+    async def test_the_files_revision_wins_over_a_parsers_key_of_the_same_name(self):
+        execute = AsyncMock(
+            return_value=MagicMock(
+                fetchone=MagicMock(
+                    return_value=(
+                        "doc-a",
+                        {
+                            "source_path": "s3://acme/handbook.docx",
+                            "content_hash": "h",
+                            "revision": '"etag-a"',
+                            "additional_info": {"revision": "7"},
+                        },
+                    )
+                )
+            )
+        )
+        store = TestTheIndexedLookupIssuesOneStatementPerKey._store_over(execute)
+
+        hit = await store.find_existing_document(
+            "kb", source_path="s3://acme/handbook.docx", content_hash="h"
+        )
+
+        assert hit is not None and hit.additional_info is not None
+        assert hit.additional_info["revision"] == '"etag-a"'
+
+    @staticmethod
+    def _ingesting(*, tenant: uuid.UUID | None = None) -> tuple[AsyncMock, IngestionService]:
+        insert = AsyncMock()
+        store = _store([], insert_document=insert, delete_document=AsyncMock())
+        document = Document(
+            pages=[DocumentPage(page_num=1, content="body")],
+            metadata=DocumentMetadata(filename="handbook.pdf", filesize=4, filetype="pdf"),
+        )
+        document.chunked_pages = [
+            DocumentPageChunk(chunk_content="body", chunk_num=0, page_num=1, content="body")
+        ]
+        document.metadata.content_hash = "hash-a"
+        processor = MagicMock(process_file=AsyncMock(return_value=document))
+        return insert, IngestionService(processor=processor, vector_store=store, tenant=tenant)
+
+    async def test_an_ingest_stores_the_revision_beside_the_hash(self):
+        """On the document `insert_document` writes, so it is on every chunk -
+        in the vector metadata, where a dead run's clean-up removes it with the
+        vectors, rather than only on the tracking row."""
+        insert, service = self._ingesting()
+
+        result = await service.ingest_file(
+            filepath=Path("handbook.pdf"),
+            collection_name="kb",
+            source_path="s3://acme/handbook.pdf",
+            revision='"etag-2"',
+        )
+
+        assert result.status is IngestionStatus.DONE
+        written: Document = insert.await_args.kwargs["document"]
+        assert (written.metadata.content_hash, written.metadata.revision) == (
+            "hash-a",
+            '"etag-2"',
+        )
+
+    async def test_an_ingest_given_no_revision_stores_none(self):
+        insert, service = self._ingesting()
+
+        await service.ingest_file(
+            filepath=Path("handbook.pdf"), collection_name="kb", source_path="handbook.pdf"
+        )
+
+        written: Document = insert.await_args.kwargs["document"]
+        assert written.metadata.revision is None
+
+    async def test_a_refreshed_revision_is_written_in_the_ingesters_tenant(self):
+        """The same confinement as the replace-delete (#1684): a document id
+        alone reaches every tenant's rows under it on a shared table."""
+        tenant = uuid.uuid4()
+        seen: list[tuple[str, str, str, uuid.UUID | None]] = []
+
+        async def restamp(
+            collection_name: str, document_id: str, revision: str, tenant: uuid.UUID | None = None
+        ) -> None:
+            seen.append((collection_name, document_id, revision, tenant))
+
+        store = _store([], restamp_document_revision=AsyncMock(side_effect=restamp))
+        service = IngestionService(processor=MagicMock(), vector_store=store, tenant=tenant)
+
+        await service.restamp_revision("kb", "doc-a", '"etag-2"')
+
+        assert seen == [("kb", "doc-a", '"etag-2"', tenant)]
+
+    async def test_a_refresh_the_store_refuses_raises(self):
+        """Unlike the lookup, which answers "no match" on a store error: a write
+        that failed is a failure, and the sync counts it as one."""
+        store = _store(
+            [], restamp_document_revision=AsyncMock(side_effect=RuntimeError("connection refused"))
+        )
+        service = IngestionService(processor=MagicMock(), vector_store=store)
+
+        with pytest.raises(RuntimeError, match="connection refused"):
+            await service.restamp_revision("kb", "doc-a", '"etag-2"')
 
 
 class TestADocumentThatNamesItsOwnAddress:

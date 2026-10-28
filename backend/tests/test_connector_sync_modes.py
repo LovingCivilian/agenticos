@@ -39,18 +39,25 @@ BODY = b"the handbook, unchanged since last night"
 BODY_HASH = hashlib.sha256(BODY).hexdigest()
 SOURCE_PATH = "gdrive://file-1"
 KB_ID = uuid.uuid4()
+TENANT = uuid.uuid4()
 ROW_ID = uuid.uuid4()
 IMAGE_MODEL = "openai:gpt-4o-mini"
 EMBEDDING_MODEL = "openai:text-embedding-3-small"
 
 
-def _stored(*, content_hash: str, source_path: str = SOURCE_PATH) -> MagicMock:
+def _stored(
+    *, content_hash: str, source_path: str = SOURCE_PATH, revision: str | None = None
+) -> MagicMock:
     """One row of a collection's document listing, as the store answers it."""
     return MagicMock(
         id="vector-doc-1",
         document_id="vector-doc-1",
         filename="handbook.md",
-        additional_info={"source_path": source_path, "content_hash": content_hash},
+        additional_info={
+            "source_path": source_path,
+            "content_hash": content_hash,
+            "revision": revision,
+        },
     )
 
 
@@ -70,7 +77,7 @@ def _result(*, replaced: str | None = None) -> MagicMock:
     )
 
 
-def _connector(*, written: bytes = BODY) -> MagicMock:
+def _connector(*, written: bytes = BODY, revision: str | None = None) -> MagicMock:
     """A connector answering one file, whose download writes real bytes.
 
     Real bytes because the flow hashes what landed on disk - a stand-in that
@@ -85,7 +92,14 @@ def _connector(*, written: bytes = BODY) -> MagicMock:
     return MagicMock(
         list_files=AsyncMock(
             return_value=RemoteListing(
-                files=[RemoteFile(id="file-1", name="handbook.md", source_path=SOURCE_PATH)]
+                files=[
+                    RemoteFile(
+                        id="file-1",
+                        name="handbook.md",
+                        source_path=SOURCE_PATH,
+                        revision=revision,
+                    )
+                ]
             )
         ),
         download_file=AsyncMock(side_effect=download),
@@ -102,6 +116,7 @@ async def _syncing(
     listing: list[MagicMock],
     connector: MagicMock,
     replaced: str | None = None,
+    restamp: AsyncMock | None = None,
 ) -> Any:
     """The connector flow with its store, database and ingest replaced.
 
@@ -111,6 +126,7 @@ async def _syncing(
     store = MagicMock()
     store.get_documents = AsyncMock(return_value=listing)
     store.find_existing_document = BaseVectorStore.find_existing_document.__get__(store)
+    store.restamp_document_revision = restamp if restamp is not None else AsyncMock()
 
     source = MagicMock(
         connector_type="gdrive",
@@ -151,7 +167,10 @@ async def _syncing(
             "_knowledge_base_for",
             new=AsyncMock(
                 return_value=MagicMock(
-                    id=KB_ID, ingestion_config={}, embedding_model=EMBEDDING_MODEL
+                    id=KB_ID,
+                    ingestion_config={},
+                    embedding_model=EMBEDDING_MODEL,
+                    vector_tenant=TENANT,
                 )
             ),
         ),
@@ -172,8 +191,11 @@ async def _sync(
     listing: list[MagicMock],
     connector: MagicMock,
     replaced: str | None = None,
+    restamp: AsyncMock | None = None,
 ) -> Any:
-    async with _syncing(mode=mode, listing=listing, connector=connector, replaced=replaced) as (
+    async with _syncing(
+        mode=mode, listing=listing, connector=connector, replaced=replaced, restamp=restamp
+    ) as (
         ingest,
         documents,
     ):
@@ -367,6 +389,195 @@ class TestAChangedFile:
         ingest.assert_awaited_once()
         assert answer["updated"] == 1
         assert answer["skipped"] == 0
+
+
+Restamp = tuple[str, str, str, uuid.UUID | None]
+
+
+def _restamps() -> tuple[AsyncMock, list[Restamp]]:
+    """A store's `restamp_document_revision`, and what it was asked to write.
+
+    Recorded through the store method's own signature, so the assertion is about
+    which document got which revision for which tenant, not about whether the
+    caller passed them by position or by name.
+    """
+    seen: list[Restamp] = []
+
+    async def restamp(
+        collection_name: str, document_id: str, revision: str, tenant: uuid.UUID | None = None
+    ) -> None:
+        seen.append((collection_name, document_id, revision, tenant))
+
+    return AsyncMock(side_effect=restamp), seen
+
+
+class TestARevisionTheListingReports:
+    """#28. The hash saves the embedding and not the transfer, because a hash
+    needs the bytes - so a nightly sync of a large bucket downloaded all of it
+    to find that nothing had changed. A revision is what the remote system says
+    about a file in its listing (an S3 `ETag`), read before the download."""
+
+    @pytest.mark.parametrize("mode", ["new_only", "update_only"])
+    async def test_an_unchanged_revision_skips_the_download(self, mode: str):
+        connector = _connector(revision='"etag-1"')
+
+        answer, ingest, _ = await _sync(
+            mode=mode,
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+        )
+
+        connector.download_file.assert_not_awaited()
+        ingest.assert_not_awaited()
+        assert (answer["skipped"], answer["ingested"], answer["updated"], answer["failed"]) == (
+            1,
+            0,
+            0,
+            0,
+        )
+
+    @pytest.mark.parametrize("mode", ["new_only", "update_only"])
+    async def test_a_file_skipped_on_its_revision_is_still_claimed(self, mode: str):
+        """The skip comes after the claim, where the `update_only` skip is. Before
+        it, a file this source still lists would be unclaimed, and another source
+        dropping the same address could remove the document (#1879)."""
+        connector = _connector(revision='"etag-1"')
+
+        _answer, _ingest, documents = await _sync(
+            mode=mode,
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+        )
+
+        connector.download_file.assert_not_awaited()
+        assert documents.claim_listed.await_args.kwargs["documents"] == {
+            (SOURCE_PATH, "vector-doc-1")
+        }
+
+    async def test_full_downloads_and_ingests_whatever_the_revision_says(self):
+        """`full` is the remedy for a revision that can miss a change, so it must
+        not read one - as it already does not read the hash."""
+        restamp, seen = _restamps()
+        connector = _connector(revision='"etag-1"')
+
+        answer, ingest, _ = await _sync(
+            mode="full",
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+            replaced="vector-doc-1",
+            restamp=restamp,
+        )
+
+        connector.download_file.assert_awaited_once()
+        assert ingest.await_args.kwargs["revision"] == '"etag-1"'
+        assert (answer["updated"], answer["skipped"]) == (1, 0)
+        # The replacement carries the revision; there is nothing to restamp.
+        assert seen == []
+
+    @pytest.mark.parametrize("mode", ["new_only", "update_only"])
+    async def test_a_touched_file_is_downloaded_once_and_its_new_revision_stored(self, mode: str):
+        """A new revision over the same bytes - an object uploaded again with
+        another part size, a file touched. The hash says it is current, so it is
+        not embedded again; the stored revision is refreshed so the next run does
+        not download it again, and again after that."""
+        restamp, seen = _restamps()
+        connector = _connector(revision='"etag-2"')
+
+        answer, ingest, _ = await _sync(
+            mode=mode,
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+            restamp=restamp,
+        )
+
+        connector.download_file.assert_awaited_once()
+        ingest.assert_not_awaited()
+        assert seen == [("docs", "vector-doc-1", '"etag-2"', TENANT)]
+        assert (answer["skipped"], answer["failed"]) == (1, 0)
+
+    async def test_a_changed_file_is_re_ingested_with_its_new_revision(self):
+        restamp, seen = _restamps()
+        connector = _connector(written=b"the handbook, edited this morning", revision='"etag-2"')
+
+        answer, ingest, _ = await _sync(
+            mode="new_only",
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+            replaced="vector-doc-1",
+            restamp=restamp,
+        )
+
+        assert ingest.await_args.kwargs["revision"] == '"etag-2"'
+        assert answer["updated"] == 1
+        # The new document carries the revision; there is nothing to restamp.
+        assert seen == []
+
+    async def test_a_new_file_is_ingested_with_its_revision(self):
+        answer, ingest, _ = await _sync(
+            mode="new_only", listing=[], connector=_connector(revision='"etag-1"')
+        )
+
+        assert ingest.await_args.kwargs["revision"] == '"etag-1"'
+        assert answer["ingested"] == 1
+
+    async def test_a_document_stored_before_revisions_is_downloaded_once_then_stamped(self):
+        """Every document synced before this change has no revision. The first
+        run after the upgrade takes the hash path for it, as every run did
+        before, and leaves the listed revision behind for the next one."""
+        restamp, seen = _restamps()
+        connector = _connector(revision='"etag-1"')
+
+        answer, ingest, _ = await _sync(
+            mode="new_only",
+            listing=[_stored(content_hash=BODY_HASH)],
+            connector=connector,
+            restamp=restamp,
+        )
+
+        connector.download_file.assert_awaited_once()
+        ingest.assert_not_awaited()
+        assert seen == [("docs", "vector-doc-1", '"etag-1"', TENANT)]
+        assert answer["skipped"] == 1
+
+    @pytest.mark.parametrize("stored_revision", [None, '"etag-1"'])
+    async def test_a_connector_that_reports_no_revision_keeps_the_hash_path(
+        self, stored_revision: str | None
+    ):
+        """A guard, and it passes before the change by design: no listed revision
+        is never "unchanged", even against a document that has none either, and
+        a revision a connector stopped reporting is never compared."""
+        restamp, seen = _restamps()
+        connector = _connector()
+
+        answer, ingest, _ = await _sync(
+            mode="new_only",
+            listing=[_stored(content_hash=BODY_HASH, revision=stored_revision)],
+            connector=connector,
+            restamp=restamp,
+        )
+
+        connector.download_file.assert_awaited_once()
+        ingest.assert_not_awaited()
+        assert seen == []
+        assert answer["skipped"] == 1
+
+    async def test_a_refresh_that_fails_counts_the_file_as_failed_and_keeps_its_claim(self):
+        """Counted, not swallowed: a skip that could not record its revision is
+        a file the next run downloads again, and the sync log should say so."""
+        connector = _connector(revision='"etag-2"')
+
+        answer, ingest, documents = await _sync(
+            mode="new_only",
+            listing=[_stored(content_hash=BODY_HASH, revision='"etag-1"')],
+            connector=connector,
+            restamp=AsyncMock(side_effect=RuntimeError("the database went away")),
+        )
+
+        ingest.assert_not_awaited()
+        assert (answer["failed"], answer["skipped"]) == (1, 0)
+        assert documents.claim_listed.await_args.kwargs["documents"] == {
+            (SOURCE_PATH, "vector-doc-1")
+        }
 
 
 class TestWhatTheSyncLogIsTold:

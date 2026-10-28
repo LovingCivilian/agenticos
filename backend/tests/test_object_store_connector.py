@@ -127,6 +127,25 @@ class TestWhatEveryObjectStoreGetsForFree:
 
         assert (files[0].size, files[0].modified_at) == (41, when)
 
+    async def test_an_objects_etag_is_its_revision(self):
+        """What the sync compares before it downloads (#28): every store has an
+        ETag, and an equal one means unchanged content. The shared listing maps
+        it, so the next store only has to report it."""
+        connector = BlobConnector([StoredObject(key="a.md", etag='"0x8DC1A2B3C4D5E6F"')])
+
+        files = (await connector.list_files({"container": "docs"}, None)).files
+
+        assert files[0].revision == '"0x8DC1A2B3C4D5E6F"'
+
+    async def test_an_object_listed_without_an_etag_has_no_revision(self):
+        """No revision is never "unchanged": the file takes the download and the
+        hash, as every file did before #28."""
+        connector = BlobConnector([StoredObject(key="a.md")])
+
+        files = (await connector.list_files({"container": "docs"}, None)).files
+
+        assert files[0].revision is None
+
     async def test_the_download_reads_the_container_back_out_of_the_source_path(
         self, tmp_path: Path
     ):
@@ -205,6 +224,42 @@ class TestTheS3ConnectorStillListsWhatItListed:
         client.get_paginator.return_value.paginate.assert_called_once_with(
             Bucket="acme", Prefix="legal/"
         )
+
+    async def test_each_objects_etag_is_reported_verbatim_as_its_revision(self):
+        """Quotes and the multipart `-<parts>` suffix included. The sync compares
+        one listing with an earlier listing of the same API, so a value kept as
+        S3 sent it cannot drift between two versions of a transformation. A
+        multipart ETag is not an MD5 of the bytes, which does not matter: an
+        equal ETag still means unchanged content, and a new one for the same
+        bytes costs one download, never a skipped change."""
+        client = self._client(
+            [
+                {
+                    "Contents": [
+                        {
+                            "Key": "legal/nda.pdf",
+                            "Size": 12,
+                            "ETag": '"9b2cf535f27731c974343645a3985328"',
+                        },
+                        {
+                            "Key": "legal/archive.zip",
+                            "Size": 52428800,
+                            "ETag": '"d41d8cd98f00b204e9800998ecf8427e-7"',
+                        },
+                        # An S3-compatible store that sends none.
+                        {"Key": "legal/readme.md", "Size": 3},
+                    ]
+                }
+            ]
+        )
+        with patch.object(S3Connector, "_get_s3_client", return_value=client):
+            listing = await S3Connector().list_files({"bucket": "acme"}, self._credential())
+
+        assert [(f.id, f.revision) for f in listing.files] == [
+            ("legal/nda.pdf", '"9b2cf535f27731c974343645a3985328"'),
+            ("legal/archive.zip", '"d41d8cd98f00b204e9800998ecf8427e-7"'),
+            ("legal/readme.md", None),
+        ]
 
     async def test_an_empty_prefix_is_omitted_rather_than_sent_empty(self):
         """What the connector did before it was a subclass, kept deliberately: a
