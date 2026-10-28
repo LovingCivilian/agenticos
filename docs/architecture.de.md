@@ -1,5 +1,5 @@
 ---
-source_sha: "4cea402448d3"
+source_sha: "052a2707e57f"
 ---
 
 # Architektur { #architecture }
@@ -124,7 +124,7 @@ von Sortierreihenfolgen, als Typ importiert und nicht als Datenzugriff.
 
 ### RAG-Connectors (`rag/connectors/`) { #rag-connectors-ragconnectors }
 - Einsteckbare Sync-Adapter, die `BaseSyncConnector` implementieren
-- Jeder Connector stellt `list_files()` und `download_file()` bereit
+- Jeder Connector stellt `list_files()` und `fetch_file()` bereit
 - Registriert in `CONNECTOR_REGISTRY`, um zur Laufzeit gefunden zu werden
 
 ## Die Transaktion der Anfrage { #the-requests-transaction }
@@ -974,7 +974,7 @@ Entfernte Dokumentquellen nutzen einsteckbare Connectors in
 mit `list_files()` und `_fetch()`, deklariert ein `SECRET_KIND`, das das
 Vault-Secret benennt, mit dem er sich authentifiziert, und deklariert ein
 `CONFIG_MODEL` - ein Pydantic-Modell, das sagt, wie die Dokumente zu finden sind,
-dem Assistenten als JSON Schema veröffentlicht. `download_file()` ist
+dem Assistenten als JSON Schema veröffentlicht. `fetch_file()` ist
 konkret und entscheidet, wo eine Datei landen darf. Siehe `docs/patterns.md` dazu,
 wie man einen hinzufügt, und `docs/howto/add-sync-connector.md` für ein
 durchgearbeitetes Beispiel.

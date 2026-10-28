@@ -28,7 +28,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -40,7 +40,7 @@ flowchart TD
 2. User triggers a **sync** (via API, CLI, or scheduled task)
 3. Whoever runs the sync unseals that secret and hands it in; the connector's
    `list_files()` returns a `RemoteListing`
-4. For each file, `BaseSyncConnector.download_file()` decides where it may land
+4. For each file, `BaseSyncConnector.fetch_file()` decides where it may land
    and calls the connector's `_fetch()` to write it there
 5. The ingestion pipeline parses, chunks, embeds, and stores each file
 6. If the listing was complete, the documents this source brought in earlier and
@@ -56,7 +56,7 @@ flowchart TD
     you are given, and nothing else** - a connector that picked its own path
     would be one refusal per connector to remember.
 
-`download_file()` is concrete and is not overridden. It resolves
+`fetch_file()` is concrete and is not overridden. It resolves
 `RemoteFile.name` against the sync directory and confirms containment before a
 byte is written, then hands `_fetch()` a `dest_path` to write to.
 

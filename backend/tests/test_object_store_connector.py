@@ -170,7 +170,7 @@ class TestWhatEveryObjectStoreGetsForFree:
         config it is handed need not be the one that listed it - the address is."""
         connector = BlobConnector()
 
-        landed = await connector.download_file(
+        landed = await connector.fetch_file(
             RemoteFile(
                 id="legal/nda.pdf", name="nda.pdf", source_path="azblob://docs/legal/nda.pdf"
             ),
@@ -179,7 +179,7 @@ class TestWhatEveryObjectStoreGetsForFree:
         )
 
         assert connector.downloaded == [("docs", "legal/nda.pdf", tmp_path / "nda.pdf")]
-        assert landed.read_bytes() == b"contents"
+        assert landed.path.read_bytes() == b"contents"
 
     async def test_a_fetch_answers_the_version_the_store_sent_not_the_listed_one(
         self, tmp_path: Path
@@ -205,13 +205,13 @@ class TestWhatEveryObjectStoreGetsForFree:
         assert connector.sizes == [12]
 
     async def test_a_name_climbing_out_of_the_sync_directory_is_refused(self, tmp_path: Path):
-        """Inherited from `BaseSyncConnector.download_file`, and asserted here
+        """Inherited from `BaseSyncConnector.fetch_file`, and asserted here
         because it is the property a new store most easily loses: the destination
         is not the connector's to choose."""
         connector = BlobConnector()
 
         with pytest.raises(BadRequestError):
-            await connector.download_file(
+            await connector.fetch_file(
                 RemoteFile(id="docs/..", name="..", source_path="azblob://docs/docs/.."),
                 tmp_path,
                 config={"container": "docs"},

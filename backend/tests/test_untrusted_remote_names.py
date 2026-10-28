@@ -148,7 +148,7 @@ class TestNoConnectorChoosesItsOwnDestination:
         sync_dir = tmp_path / "sync"
         sync_dir.mkdir()
 
-        local = await _RecordingConnector().download_file(_remote("../pwned.txt"), sync_dir)
+        local = (await _RecordingConnector().fetch_file(_remote("../pwned.txt"), sync_dir)).path
 
         assert local == sync_dir / "pwned.txt"
         assert local.read_bytes() == b"payload"
@@ -159,14 +159,14 @@ class TestNoConnectorChoosesItsOwnDestination:
         sync_dir.mkdir()
 
         with pytest.raises(BadRequestError):
-            await _RecordingConnector().download_file(_remote(".."), sync_dir)
+            await _RecordingConnector().fetch_file(_remote(".."), sync_dir)
 
         assert list(sync_dir.iterdir()) == []
 
     def test_no_shipped_connector_overrides_the_destination(self) -> None:
         """A connector added later inherits the answer because it cannot pick a path."""
         for connector_cls in CONNECTOR_REGISTRY.values():
-            assert connector_cls.download_file is BaseSyncConnector.download_file
+            assert connector_cls.fetch_file is BaseSyncConnector.fetch_file
 
 
 class TestTheGoogleDriveConnector:
@@ -179,7 +179,9 @@ class TestTheGoogleDriveConnector:
         connector = GoogleDriveConnector()
         monkeypatch.setattr(connector, "_get_drive_service", lambda credential: remote.client())
 
-        local = await connector.download_file(_remote("../authorized_keys"), sync_dir, config={})
+        local = (
+            await connector.fetch_file(_remote("../authorized_keys"), sync_dir, config={})
+        ).path
 
         assert local == sync_dir / "authorized_keys"
         assert local.read_bytes() == b"payload"
@@ -192,7 +194,7 @@ class TestTheGoogleDriveConnector:
         connector = GoogleDriveConnector()
         monkeypatch.setattr(connector, "_get_drive_service", lambda credential: remote.client())
 
-        await connector.download_file(_remote("Plan.pdf"), tmp_path, config={})
+        await connector.fetch_file(_remote("Plan.pdf"), tmp_path, config={})
 
         exported = remote.requests[-1]
         assert exported.url.path == "/drive/v3/files/f1/export"
@@ -356,7 +358,7 @@ class TestTheS3Connector:
         monkeypatch.setattr(connector, "_get_s3_client", lambda config: client)
 
         with pytest.raises(BadRequestError):
-            await connector.download_file(
+            await connector.fetch_file(
                 RemoteFile(id="docs/..", name="..", source_path="s3://bucket/docs/.."),
                 tmp_path,
                 config={},

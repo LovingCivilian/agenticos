@@ -1,5 +1,5 @@
 ---
-source_sha: "8caa477ddcbc"
+source_sha: "220fc56aa1cc"
 ---
 
 # Einen Sync-Connector hinzufügen { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -46,7 +46,7 @@ flowchart TD
    Aufgabe)
 3. Wer den Sync ausführt, entsiegelt dieses Secret und reicht es hinein; das
    `list_files()` des Connectors gibt ein `RemoteListing` zurück
-4. Für jede Datei entscheidet `BaseSyncConnector.download_file()`, wo sie landen
+4. Für jede Datei entscheidet `BaseSyncConnector.fetch_file()`, wo sie landen
    darf, und ruft das `_fetch()` des Connectors auf, um sie dort zu schreiben
 5. Die Ingestion-Pipeline parst, zerteilt, bettet ein und speichert jede Datei
 6. War die Auflistung vollständig, werden die Dokumente, die diese Source früher
@@ -64,7 +64,7 @@ flowchart TD
     der seinen eigenen Pfad wählte, wäre eine Ablehnung pro Connector, an die man
     denken müsste.
 
-`download_file()` ist konkret und wird nicht überschrieben. Es löst
+`fetch_file()` ist konkret und wird nicht überschrieben. Es löst
 `RemoteFile.name` gegen das Sync-Verzeichnis auf und bestätigt die Enthaltenheit,
 bevor ein einziges Byte geschrieben wird, und reicht `_fetch()` dann einen
 `dest_path` zum Schreiben.

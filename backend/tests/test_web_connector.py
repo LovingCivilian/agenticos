@@ -801,7 +801,7 @@ class TestTheSitemap:
         config = _config(sitemap_url="https://docs.example.com/sitemap.xml")
         listing = await connector.list_files(config, None)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=config)
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=config)).path
 
         assert (
             path.read_text()
@@ -826,7 +826,7 @@ class TestTheSitemap:
         )
 
         with pytest.raises(BadRequestError) as exc:
-            await _Fast(transport=site).download_file(file, tmp_path, config=_config())
+            await _Fast(transport=site).fetch_file(file, tmp_path, config=_config())
 
         assert exc.value.message == message
 
@@ -857,7 +857,7 @@ class TestTheSitemap:
         )
 
         with pytest.raises(WithdrawnFile) as exc:
-            await _Fast(transport=site).download_file(file, tmp_path, config=_config())
+            await _Fast(transport=site).fetch_file(file, tmp_path, config=_config())
 
         assert exc.value.message == message
 
@@ -868,7 +868,7 @@ class TestTheSitemap:
         file = RemoteFile(id="https://docs.example.com/guide/a", name="a.md", source_path="web://x")
 
         with pytest.raises(WithdrawnFile) as exc:
-            await _Fast(transport=site).download_file(file, tmp_path, config=_config())
+            await _Fast(transport=site).fetch_file(file, tmp_path, config=_config())
 
         assert exc.value.message == "robots.txt no longer allows docs.example.com/guide/a."
         assert site.requested == ["docs.example.com/robots.txt"]
@@ -883,7 +883,7 @@ class TestWhatIsWritten:
         listing = await connector.list_files(_config(), None)
         requests_after_listing = len(site.requested)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=_config())
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=_config())).path
 
         assert len(site.requested) == requests_after_listing
         assert path.name == "docs.example.com-guide.md"
@@ -902,7 +902,7 @@ class TestWhatIsWritten:
         config = _config(root_url="https://docs.example.com/guide/?token=s3cret")
         listing = await connector.list_files(config, None)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=config)
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=config)).path
 
         assert listing.files[0].source_path == "web://docs.example.com/guide/?token=s3cret"
         assert "s3cret" not in path.read_text()
@@ -921,7 +921,7 @@ class TestWhatIsWritten:
         connector = _Fast(transport=site)
         listing = await connector.list_files(_config(), None)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=_config())
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=_config())).path
 
         assert "Zażółć." in path.read_text()
 
@@ -932,7 +932,7 @@ class TestWhatIsWritten:
         connector = _Fast(transport=site)
         listing = await connector.list_files(_config(), None)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=_config())
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=_config())).path
 
         assert path.read_text().startswith("# Guide\n\nSource: https://docs.example.com/guide/")
 
@@ -954,10 +954,10 @@ class TestWhatIsWritten:
             connector = _Fast(transport=site)
             listing = await connector.list_files(_config(), None)
             (tmp_path / nonce).mkdir()
-            path = await connector.download_file(
+            fetched = await connector.fetch_file(
                 listing.files[0], tmp_path / nonce, config=_config()
             )
-            written.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            written.append(hashlib.sha256(fetched.path.read_bytes()).hexdigest())
 
         assert written[0] == written[1]
 
@@ -969,7 +969,7 @@ class TestWhatIsWritten:
         connector = _Fast(transport=site)
         listing = await connector.list_files(_config(), None)
 
-        path = await connector.download_file(listing.files[0], tmp_path, config=_config())
+        path = (await connector.fetch_file(listing.files[0], tmp_path, config=_config())).path
 
         assert site.requested.count("docs.example.com/guide/") == 2
         assert "Text." in path.read_text()
@@ -1026,7 +1026,7 @@ class TestASyncHasATimeLimit:
         file = RemoteFile(id="https://docs.example.com/guide/a", name="a.md", source_path="web://x")
 
         with pytest.raises(BadRequestError) as exc:
-            await _OutOfTimeAfter(site, reads=0).download_file(file, tmp_path, config=_config())
+            await _OutOfTimeAfter(site, reads=0).fetch_file(file, tmp_path, config=_config())
 
         assert exc.value.message == self._PROBLEM
         assert site.requested == []

@@ -14,7 +14,7 @@ everything a reader of three connectors would otherwise have to check three
 times - that a key ending in `/` is a directory marker and not a document, that
 `source_path` is `<scheme>://<container>/<key>` and is the dedup key the whole
 sync path matches on, and that the destination is the base class's answer rather
-than the connector's (`BaseSyncConnector.download_file`, which is inherited for
+than the connector's (`BaseSyncConnector.fetch_file`, which is inherited for
 the reason its own docstring gives).
 """
 

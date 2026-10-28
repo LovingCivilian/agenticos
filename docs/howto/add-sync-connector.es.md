@@ -1,5 +1,5 @@
 ---
-source_sha: "8caa477ddcbc"
+source_sha: "220fc56aa1cc"
 ---
 
 # Añade un sync connector { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -45,7 +45,7 @@ flowchart TD
 2. Alguien lanza un **sync** (por la API, la CLI o una tarea programada)
 3. Quien ejecuta el sync desprecinta ese secreto y lo pasa; el `list_files()` del
    connector devuelve un `RemoteListing`
-4. Para cada archivo, `BaseSyncConnector.download_file()` decide dónde puede
+4. Para cada archivo, `BaseSyncConnector.fetch_file()` decide dónde puede
    aterrizar y llama al `_fetch()` del connector para escribirlo ahí
 5. El pipeline de ingesta analiza, trocea, embebe y almacena cada archivo
 6. Si el listado estaba completo, los documentos que esta source trajo antes y
@@ -61,7 +61,7 @@ flowchart TD
     **Escribe en el `dest_path` que se te entrega, y en nada más** - un connector
     que eligiera su propia ruta sería una negativa por connector que recordar.
 
-`download_file()` es concreto y no se sobrescribe. Resuelve `RemoteFile.name`
+`fetch_file()` es concreto y no se sobrescribe. Resuelve `RemoteFile.name`
 contra el directorio de sync y confirma la contención antes de escribir un solo
 byte, y luego entrega a `_fetch()` un `dest_path` en el que escribir.
 

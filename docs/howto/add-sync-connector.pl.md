@@ -1,5 +1,5 @@
 ---
-source_sha: "8caa477ddcbc"
+source_sha: "220fc56aa1cc"
 ---
 
 # Dodaj konektor synchronizacji { #add-a-sync-connector }
@@ -33,7 +33,7 @@ flowchart TD
     A[a SyncSource: connector type, config, collection, secret id] --> B[a sync is triggered - API, CLI or schedule]
     B --> C["the caller unseals the vault secret and hands it in"]
     C --> D["list_files() -> RemoteListing"]
-    D --> E["download_file() resolves the name and confirms containment"]
+    D --> E["fetch_file() resolves the name and confirms containment"]
     E --> F["_fetch(dest_path) writes the bytes"]
     F --> G[the ingestion pipeline parses, chunks, embeds, stores]
     G --> R["a complete listing: remove what it no longer names"]
@@ -46,7 +46,7 @@ flowchart TD
    zadanie)
 3. Ten, kto uruchamia synchronizację, odpieczętowuje ten sekret i podaje go
    dalej; `list_files()` konektora zwraca `RemoteListing`
-4. Dla każdego pliku `BaseSyncConnector.download_file()` decyduje, gdzie może on
+4. Dla każdego pliku `BaseSyncConnector.fetch_file()` decyduje, gdzie może on
    wylądować, i woła `_fetch()` konektora, żeby go tam zapisać
 5. Pipeline ingestii parsuje, dzieli na chunki, embeduje i zapisuje każdy plik
 6. Jeśli listing był kompletny, dokumenty, które to źródło wprowadziło wcześniej,
@@ -62,7 +62,7 @@ flowchart TD
     które dostajesz, i do niczego innego** — konektor wybierający własną ścieżkę
     byłby jedną odmową na konektor do zapamiętania.
 
-`download_file()` jest konkretne i nie jest nadpisywane. Rozwiązuje
+`fetch_file()` jest konkretne i nie jest nadpisywane. Rozwiązuje
 `RemoteFile.name` względem katalogu synchronizacji i potwierdza zawieranie się
 w nim, zanim zostanie zapisany choć jeden bajt, a potem podaje `_fetch()`
 `dest_path`, do którego ma pisać.

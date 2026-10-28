@@ -216,19 +216,6 @@ class BaseSyncConnector(ABC):
         revision = await self._fetch(file, dest_path, config or {}, credential)
         return FetchedFile(path=dest_path, revision=revision)
 
-    async def download_file(
-        self,
-        file: RemoteFile,
-        dest_dir: Path,
-        config: ConnectorConfig | None = None,
-        credential: StorableSecret | None = None,
-    ) -> Path:
-        """Download one file into `dest_dir` and answer the local path it landed at.
-
-        `fetch_file` without the version, for a caller that only needs the bytes.
-        """
-        return (await self.fetch_file(file, dest_dir, config, credential)).path
-
     @abstractmethod
     async def _fetch(
         self,

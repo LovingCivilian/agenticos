@@ -1,5 +1,5 @@
 ---
-source_sha: "4cea402448d3"
+source_sha: "052a2707e57f"
 ---
 
 # Arquitectura { #architecture }
@@ -126,7 +126,7 @@ importado como tipo y no como acceso a datos.
 
 ### Conectores RAG (`rag/connectors/`) { #rag-connectors-ragconnectors }
 - Adaptadores de sincronización conectables que implementan `BaseSyncConnector`
-- Cada conector proporciona `list_files()` y `download_file()`
+- Cada conector proporciona `list_files()` y `fetch_file()`
 - Registrados en `CONNECTOR_REGISTRY` para descubrirlos en tiempo de ejecución
 
 ## La transacción de la petición { #the-requests-transaction }
@@ -960,7 +960,7 @@ Las fuentes remotas de documentos usan conectores enchufables en
 `list_files()` y `_fetch()`, declara un `SECRET_KIND` que nombra el secreto del
 vault que lo autentica, y declara un `CONFIG_MODEL` - un modelo de Pydantic que
 dice cómo encontrar los documentos, publicado al asistente como JSON Schema.
-`download_file()` es concreto y decide dónde puede aterrizar un archivo. Ver
+`fetch_file()` es concreto y decide dónde puede aterrizar un archivo. Ver
 `docs/patterns.md` para saber cómo añadir uno, y
 `docs/howto/add-sync-connector.md` para un ejemplo resuelto.
 

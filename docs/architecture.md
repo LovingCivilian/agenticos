@@ -118,7 +118,7 @@ type rather than as data access.
 
 ### RAG connectors (`rag/connectors/`)
 - Pluggable sync adapters that implement `BaseSyncConnector`
-- Each connector provides `list_files()` and `download_file()`
+- Each connector provides `list_files()` and `fetch_file()`
 - Registered in `CONNECTOR_REGISTRY` for discovery at runtime
 
 ## The request's transaction
@@ -911,7 +911,7 @@ Remote document sources use pluggable connectors in
 with `list_files()` and `_fetch()`, declares a `SECRET_KIND` naming the vault
 secret that authenticates it, and declares a `CONFIG_MODEL` - a Pydantic model
 saying how to find the documents, published to the wizard as JSON Schema.
-`download_file()` is
+`fetch_file()` is
 concrete and decides where a file may land. See `docs/patterns.md` for how to
 add one, and `docs/howto/add-sync-connector.md` for a worked example.
 
