@@ -403,10 +403,9 @@ class BaseVectorStore(ABC):
                         "source_path": metadata.get("source_path", ""),
                         "content_hash": metadata.get("content_hash", ""),
                         **(metadata.get("additional_info") or {}),
-                        # After the parser's own keys, not before: a DOCX's core
-                        # properties carry a `revision` counter, and read as the
-                        # connector's revision it would decide whether a file is
-                        # downloaded.
+                        # After the parser's own keys, not before: a parser key
+                        # named `revision`, read as the connector's revision,
+                        # would decide whether a file is downloaded.
                         "revision": metadata.get("revision"),
                     },
                     "chunk_count": 0,

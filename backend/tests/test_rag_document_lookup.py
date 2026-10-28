@@ -228,9 +228,9 @@ class TestTheRevisionTravelsWithTheDocument:
 
     async def test_a_parsers_own_revision_key_is_not_the_files_revision(self):
         """A parser's nested `additional_info` is spread into what the lookup
-        returns - a DOCX's core properties include a `revision` counter. Read as
-        the connector's revision, a document property would decide whether a
-        file is downloaded."""
+        returns, so a parser key named `revision` lands beside the connector's.
+        Read as the connector's revision, a document property would decide
+        whether a file is downloaded."""
         execute = AsyncMock(
             return_value=MagicMock(
                 fetchone=MagicMock(
