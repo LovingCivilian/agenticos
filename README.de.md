@@ -1,4 +1,4 @@
-<!-- source_sha: 5a4d6fb78011 -->
+<!-- source_sha: 2400b41d4334 -->
 
 <div align="center">
 
@@ -149,9 +149,9 @@ Es läuft mit Docker Compose auf deiner eigenen Infrastruktur und arbeitet mit 2
 
 **Wie sich AgenticOS in ein Unternehmen einfügt:** Abteilungen wie Finanzen, Betrieb oder Vorstand nutzen gemeinsame Agenten im Webchat, in Slack oder in einem privaten Workspace. Deine Systeme rufen Agenten über die API auf, und Ereignisse oder Zeitpläne starten sie automatisch. Jede Anfrage durchläuft dieselben Kontrollen: Rollen, Budgets, Freigaben, Guardrails und einen aufgezeichneten Run. Deine Daten, Vektoren, Code-Sandboxes, der Vault für Zugangsdaten und optionale lokale Modelle bleiben auf deiner Infrastruktur. Gehostete Modelle, SaaS-Werkzeuge und externe Dokumentquellen werden nur genutzt, wenn du sie konfigurierst.
 
-<img src="docs/assets/readme/figures.webp" alt="29 integrierte Capabilities, pro Agent einschaltbar; 8 Orte, an denen ein Agent antwortet; 28 Modellanbieter, gehostet, in deiner Cloud oder lokal; 5 Quellen für die Dokumentsynchronisation; über 4.700 MCP-Server in der Galerie; 29 Tutorials, jedes mit einer Prüfung, die du ausführen kannst." width="100%">
+<img src="docs/assets/readme/figures.webp" alt="29 integrierte Capabilities, pro Agent einschaltbar; 8 Orte, an denen ein Agent antwortet; 28 Modellanbieter, gehostet, in deiner Cloud oder lokal; 6 Quellen für die Dokumentsynchronisation; über 4.700 MCP-Server in der Galerie; 29 Tutorials, jedes mit einer Prüfung, die du ausführen kannst." width="100%">
 
-<p align="center"><sub><b>Auf einen Blick:</b> 29 integrierte Capabilities · 8 Orte, an denen ein Agent antwortet · 28 Modellanbieter · 5 Synchronisationsquellen für Dokumente · über 4.700 MCP-Server · 29 Tutorials.</sub></p>
+<p align="center"><sub><b>Auf einen Blick:</b> 29 integrierte Capabilities · 8 Orte, an denen ein Agent antwortet · 28 Modellanbieter · 6 Synchronisationsquellen für Dokumente · über 4.700 MCP-Server · 29 Tutorials.</sub></p>
 
 ## ✨ Was du damit machen kannst
 
@@ -199,7 +199,7 @@ AgenticOS verbindet Agenten mit den Modellen, Chatwerkzeugen, Geschäftsanwendun
 |---|---|---|
 | **Chatwerkzeuge** | Veröffentliche einen Agenten in Slack, Mattermost oder Telegram, als Website-Widget, gehostete Seite, über die API oder einen WebSocket | [Kanäle](https://vstorm-co.github.io/agenticos/de/channels/) |
 | **Geschäftswerkzeuge** | **über 4.700 MCP-Server** in der Galerie (Notion, GitHub, Jira, HubSpot, Stripe…) und eigene Server; wähle, welche Werkzeuge jeder Agent aufrufen darf | [MCP](https://vstorm-co.github.io/agenticos/de/mcp/) |
-| **Dokumente** | Synchronisiere Google Drive, S3/MinIO, Git-Repositories, Websites, SharePoint und OneDrive in Wissensbasen | [Synchronisationsquellen](https://vstorm-co.github.io/agenticos/de/howto/configure-sync-sources/) |
+| **Dokumente** | Synchronisiere Google Drive, S3/MinIO, Git-Repositories, Websites, SharePoint, OneDrive und SFTP-Server in Wissensbasen | [Synchronisationsquellen](https://vstorm-co.github.io/agenticos/de/howto/configure-sync-sources/) |
 | **Ereignisse** | Starte Agenten nach Zeitplan, bei einem neuen GitHub-Issue, einer Gmail-Nachricht oder einem signierten Webhook | [Routinen](https://vstorm-co.github.io/agenticos/de/triggers/) |
 | **Modelle** | 28 Anbieter, dein ChatGPT-Abo, dein Cloud-Vertrag (Azure, Bedrock, Vertex) oder lokale Modelle (Ollama, vLLM) | [Modelle](https://vstorm-co.github.io/agenticos/de/models/) |
 
@@ -229,9 +229,9 @@ Wenn du [Claude Code](https://code.claude.com/docs/en/overview) oder [Codex](htt
 - **Kontext** enthält dauerhaftes Wissen wie ein Glossar, Richtlinien oder die Markensprache. Füge ihn dem Prompt hinzu oder lass den Agenten bei Bedarf darauf zugreifen.
 - **Wissensbasen (RAG)** machen hochgeladene Dokumente durchsuchbar. Wähle Parser-Optionen, prüfe Verarbeitungsstatus und Textabschnitte oder synchronisiere sie aus einer der unten genannten Quellen.
 
-<img src="docs/assets/readme/rag-pipeline.webp" alt="Von der Datei zur zitierten Antwort: Quellen, lesen, aufteilen, einbetten, antworten." width="100%">
+<img src="docs/assets/readme/rag-pipeline.webp" alt="Von der Datei zur zitierten Antwort: Quellen (Uploads und Synchronisation aus Google Drive, S3, Websites, Git, SharePoint, OneDrive oder SFTP), lesen, aufteilen, einbetten, antworten." width="100%">
 
-**So funktioniert Retrieval-Augmented Generation (RAG) in AgenticOS:** Dokumente werden hochgeladen oder aus Google Drive, S3/MinIO, Git, Websites, SharePoint oder OneDrive synchronisiert. Ein Parser liest sie: PyMuPDF und LiteParse laufen lokal, mit OCR für Scans, LlamaParse ist ein Cloud-Dienst. Danach werden die Dokumente in Abschnitte aufgeteilt, mit einem Modell von OpenAI, OpenRouter oder einem lokalen Ollama-Modell eingebettet und in PostgreSQL mit pgvector gespeichert. Bei einer Frage durchsucht der Agent die Vektoren mit Filtern und antwortet mit Quellenangaben.
+**So funktioniert Retrieval-Augmented Generation (RAG) in AgenticOS:** Dokumente werden hochgeladen oder aus Google Drive, S3/MinIO, Git, Websites, SharePoint, OneDrive oder SFTP-Servern synchronisiert. Ein Parser liest sie: PyMuPDF und LiteParse laufen lokal, mit OCR für Scans, LlamaParse ist ein Cloud-Dienst. Danach werden die Dokumente in Abschnitte aufgeteilt, mit einem Modell von OpenAI, OpenRouter oder einem lokalen Ollama-Modell eingebettet und in PostgreSQL mit pgvector gespeichert. Bei einer Frage durchsucht der Agent die Vektoren mit Filtern und antwortet mit Quellenangaben.
 
 [Skills](https://vstorm-co.github.io/agenticos/de/skills/) · [Kontext](https://vstorm-co.github.io/agenticos/de/context/) · [Dokumentverarbeitung](https://vstorm-co.github.io/agenticos/de/file-processing/) · [Synchronisationsquellen](https://vstorm-co.github.io/agenticos/de/howto/configure-sync-sources/)
 

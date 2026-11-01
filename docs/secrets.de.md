@@ -1,5 +1,5 @@
 ---
-source_sha: "90d9185a9978"
+source_sha: "d8b0ea3eec72"
 ---
 
 # Secrets und der Vault { #secrets-and-the-vault }
@@ -103,6 +103,7 @@ existieren.
 | `gcp_service_account` | Das JSON des Service-Accounts, beim Hineingeben validiert |
 | `github_oauth_app` | Die öffentliche Client-ID einer GitHub OAuth App und deren Secret |
 | `git_token` | Ein Zugriffstoken für git über HTTPS und der eine Host, an den es gesendet werden darf |
+| `ssh_credentials` | Ein Benutzername mit einem privaten Schlüssel oder einem Passwort, für einen SFTP-Server, und der eine Host, auf dem er verwendet werden darf |
 | `entra_app` | Tenant-ID, Client-ID und Client Secret einer App-Registrierung in Microsoft Entra |
 | `openai_codex` | Eine ChatGPT-Anmeldung: ein Access-Token, ein Refresh-Token und die Account-ID |
 | `none` | Kein Secret — die Markierung für einen Endpunkt, der keine Zugangsdaten braucht |
@@ -135,6 +136,57 @@ OpenAI-API-Schlüssel für Sprachfunktionen. Die Auswahl ändert niemals automat
 sendet, die wählt, wer die Quelle bearbeitet. An den Host gebunden, mit dem es
 abgelegt wurde, lässt sich das Token durch Bearbeiten der Quelle nicht auf einen
 anderen Server richten, und kein anderer Schlüssel kann an seine Stelle treten.
+
+`ssh_credentials` ist der SSH-Login, mit dem eine SFTP-Sync-Quelle einen Ordner
+liest. Er trägt seinen Host aus demselben Grund: Wer die Quelle bearbeitet, tippt
+die Adresse des Servers ein, und der Connector sendet den Login nur an den Host
+und Port, für den er abgelegt wurde. Ein Login, der ohne Port abgelegt wurde,
+wird nur auf Port 22 verwendet. Der Host wird so gespeichert, wie eine Quelle ihn
+schreibt - in Kleinbuchstaben, IDNA-kodiert, eine IPv6-Adresse in Kurzform, ohne
+abschließenden Punkt -, sodass ein Host nicht deshalb unpassend sein kann, weil er
+anders eingetippt wurde. Anders als der Host eines `git_token` darf er einen
+Unterstrich enthalten, etwa `sftp_server`.
+
+Ein Login enthält einen privaten Schlüssel, mit seiner Passphrase, wenn der
+Schlüssel verschlüsselt ist, oder ein Passwort, nie beides. Der Schlüssel wird
+beim Ablegen geprüft, in zwei Schritten:
+
+- **Was nichts kostet**, läuft immer, wenn ein Login geparst wird, also auch jedes
+  Mal, wenn der Vault einen öffnet. Der Schlüssel darf höchstens 16.384 Zeichen
+  lang sein und eine Passphrase oder ein Passwort höchstens 1.024, sodass nichts
+  Längeres dekodiert wird. Das Eingefügte muss ein Block mit einem
+  privaten Schlüssel sein, den die SSH-Bibliothek liest, ein verschlüsselter
+  Schlüssel braucht seine Passphrase, und der eigene Arbeitsfaktor des Schlüssels
+  ist begrenzt: höchstens 128 bcrypt-Runden (OpenSSH), oder höchstens 1.000.000
+  Iterationen und ein abgeleiteter Schlüssel von höchstens 64 Bytes (PKCS#8). Der
+  Arbeitsfaktor wird aus dem Header des Schlüssels gelesen, ohne ihn zu
+  entschlüsseln.
+- **Das Öffnen des Schlüssels** mit seiner Passphrase läuft nur, wenn ein Login
+  gespeichert wird, nachdem feststeht, dass der Aufrufer ihn schreiben darf. Es
+  läuft in einem kurzlebigen Kindprozess, der nichts von der Anwendung importiert
+  und den Schlüssel über seine Standardeingabe erhält. Der Kindprozess darf 5
+  Sekunden brauchen und wird danach beendet. Höchstens zwei laufen gleichzeitig in
+  jedem API-Prozess, und ein Speichern, das beide belegt vorfindet, wird sofort
+  abgelehnt, mit Status 503.
+
+Der Kindprozess lehnt einen RSA-Schlüssel mit mehr als 4096 Bit oder einen, dessen
+zwei Primzahlen sich in der Größe um mehr als 16 Bit unterscheiden, ab, ohne seine
+Zahlen zu prüfen, denn diese Prüfung wächst schnell mit der Größe jeder Primzahl.
+Er lehnt auch einen Schlüssel auf einem Security Key (`sk-`) ab: Der Worker hat
+keinen Hardware-Schlüssel, mit dem er signieren könnte.
+
+Der Kindprozess ist nötig, weil die teuren Zahlen eines verschlüsselten Schlüssels
+in dem Teil liegen, den erst das Entschlüsseln zeigt, und ein RSA-Schlüssel wird
+geprüft, während Pythons Interpreter-Lock gehalten wird, sodass ein Thread die
+Prüfung nicht von der Event-Loop fernhält. Ein Schlüssel, der sich nicht öffnen
+lässt, wird also abgelehnt, solange das Formular offen ist, nicht erst beim ersten
+Sync, und nur ein Aufrufer, der den Login schreiben darf, kann den Server einen
+Schlüssel öffnen lassen. Der Worker öffnet den Schlüssel in jedem Sync
+einmal erneut, was nicht mehr kostet, als die Prüfung zugelassen hat.
+
+Sein Hinweis sind die letzten vier Zeichen des Benutzernamens, der
+nicht geheim ist. Vier Zeichen eines Schlüssels wären sein PEM-Rahmen. Siehe
+[SFTP einrichten](howto/configure-sync-sources.md#sftp-setup).
 
 `entra_app` ist das, als was sich eine SharePoint- oder OneDrive-Sync-Quelle
 anmeldet. Ihre Reichweite wird in Microsoft Entra festgelegt, nicht hier: Die

@@ -1,5 +1,5 @@
 ---
-source_sha: "54fd188fd445"
+source_sha: "bcc6b38e2737"
 ---
 
 # Procesamiento de archivos { #file-processing }
@@ -1180,13 +1180,13 @@ documento guardado antes de las revisiones, así que en una colección grande es
 sincronización es más lenta. Después, ejecuta `VACUUM (ANALYZE)` en la tabla de la colección, o deja
 que autovacuum elimine las versiones antiguas de las filas.
 
-La revisión es el único punto en el que los dos flows pueden dar respuestas
+La revisión es el único punto donde los dos flows pueden dar respuestas
 distintas. La sincronización local reconoce un archivo sin cambios solo por su
 hash, y esa comprobación es exacta. Una revisión exacta, como un `ETag` de S3 o un
 sha de blob de Git, da la misma respuesta que el hash. Una revisión que puede
-pasar por alto un cambio, como un tamaño y una hora de modificación, puede hacer
-que `new_only` y `update_only` omitan una edición poco frecuente. `full` es el
-remedio: descarga e ingiere de nuevo cada archivo. Un conector cuya revisión puede
+pasar por alto un cambio, como el tamaño y la hora de modificación de un archivo
+en un servidor SFTP, puede hacer que `new_only` y `update_only` omitan una edición
+poco frecuente. `full` es el remedio: descarga e ingiere de nuevo cada archivo. Un conector cuya revisión puede
 pasar por alto un cambio lo dice en su docstring.
 
 La sincronización compara la revisión listada con la guardada en la dirección,
@@ -1292,9 +1292,10 @@ propio shell.
     tenant elige qué se lee bajo la identidad del operador.
 
 Lo que la fuente nombra en `secret_id` es un `gcp_service_account` para Drive, un
-par `aws_credentials` para S3 o un `git_token` para un repositorio Git, declarado
-por el conector como `SECRET_KIND` y ofrecido al asistente como `secret_kind` en
-el listado de conectores.
+par `aws_credentials` para S3, un `git_token` para un repositorio Git, un
+`entra_app` para SharePoint o un login `ssh_credentials` para un servidor SFTP,
+declarado por el conector como `SECRET_KIND` y ofrecido al asistente como
+`secret_kind` en el listado de conectores.
 
 Antes estaba en `config`, cifrado por `app/core/crypto.py` — una sola clave Fernet
 de ámbito de deployment sobre la credencial de cada tenant, que es justo la
@@ -1312,9 +1313,10 @@ cosas:
   usa aquí porque solo gestiona `api_key`, y una cuenta de servicio es un
   formulario de varios campos cuyo sitio honesto es el Vault.
 - **El servicio rechaza una configuración que lleva una credencial.** Enviar los
-  nombres de campo antiguos se responde con "a credential does not go in a
-  source's configuration", en vez de descartarlos para que la fuente se guarde y
-  luego no pueda autenticarse.
+  nombres de campo antiguos, o el `password`, la `private_key` o la `passphrase`
+  de un login SSH, se responde con "a credential does not go in a source's
+  configuration", en vez de descartarlos para que la fuente se guarde y luego no
+  pueda autenticarse.
 
 Leerla ocurre donde hay una sesión y un tenant: el worker abre el secreto para la
 organización de la propia fuente y se lo entrega al conector junto a la
@@ -1511,7 +1513,9 @@ repositorio de git
 GCS, cuya condición está cumplida: `S3Connector` es una subclase de
 `ObjectStoreConnector`, así que cada uno de esos es un cliente y un
 `CONNECTOR_TYPE` en vez de una segunda copia del bucle de listado
-([#988](https://github.com/vstorm-co/agenticos/issues/988)).
+([#988](https://github.com/vstorm-co/agenticos/issues/988)). El árbol de carpetas
+de un servidor SFTP lo lee el conector `sftp` - véase la [configuración de
+SFTP](howto/configure-sync-sources.md#sftp-setup).
 
 Notion, Slack y los archivos de correo se han decidido **en contra** por ahora, cada uno por un motivo
 registrado ahí — los dos últimos porque una conversación se recupera mal y las

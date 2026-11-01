@@ -41,9 +41,17 @@ Two files carry it, and a script keeps them honest.
 **[`THIRD_PARTY_NOTICES.md`](https://github.com/vstorm-co/agenticos/blob/main/THIRD_PARTY_NOTICES.md)**
 is generated and committed. For every distribution in either image it records the
 name, version, SPDX licence expression, source URL and the evidence the licence was
-read from: a `License-Expression` header, a classifier, the licence file's own text,
-the package index, or an override a person recorded. It also lists the open findings
-first, a count of components per licence, and the hand-recorded components.
+read from: a `License-Expression` header, the `License` field, a classifier, the
+licence file's own text, the package index, or an override a person recorded. It
+also lists the open findings first, a count of components per licence, and the
+hand-recorded components.
+
+The script reads a `License` field that is a valid SPDX expression as one, before
+the classifiers and the licence file. An expression that holds a deprecated SPDX
+id, such as `GPL-2.0+` or `LGPL-2.1`, or a `+` after an `-only` or `-or-later` id,
+is not taken, because no policy set names those ids. For such a field, the script
+reads the field's known spellings, the classifiers and the licence file, as
+before.
 
 **`licenses/policy.toml`** holds the decisions. An `override` entry is the licence a
 person determined for a component whose metadata does not say, with the evidence
@@ -100,7 +108,8 @@ the current figure.
 | MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, MIT-0, MIT-CMU, Unlicense | about 400 | Keep the copyright notice and the licence text with copies | Each package's own licence file ships in the image, next to the code: every wheel's `*.dist-info/` in the backend image, every package's licence file under `/app/licenses/node_modules/<name>/` in the frontend image. The notices index them |
 | Apache-2.0 | about 90 | The licence text, notice of changes, any `NOTICE` file the package carries | Same as above; nothing is modified, so there are no changes to notice |
 | PSF-2.0, CNRI-Python, Zlib, CC0-1.0 | a few | Attribution or nothing | Same as above |
-| MPL-2.0 (`bidict`, `certifi`, `pathspec`, `tqdm`, part of `orjson`) | 5 | File-level copyleft: the covered files stay under MPL and their source is available | Used unmodified; the licence text ships; the notices link the source |
+| MPL-2.0 (`bidict`, `certifi`, `pathspec`, part of `orjson`), and MPL-2.0 AND MIT (`tqdm`) | 5 | File-level copyleft: the covered files stay under MPL and their source is available. The MIT parts of `tqdm` keep their notice | Used unmodified. The licence text ships, and `tqdm`'s one licence file carries both texts. The notices link the source |
+| EPL-2.0 OR GPL-2.0-or-later (`asyncssh`) | 1 | Dual, taken under EPL-2.0 without the GPL as a Secondary License. File-level copyleft: the licence text, the notices in its files, and where its source is. A deployment that puts it in a commercial product offering also takes on the EPL's indemnity for its own warranties (s.4) | The SFTP sync connector's SSH client, which also checks the key of an SSH login in the vault. A pure-Python wheel, imported unmodified. The EPL-2.0 text ships in its dist-info, its `.py` files are its source with their headers intact, and the notices link the source. Its copyleft reaches only modified asyncssh files, so AgenticOS's own licence does not change |
 | LGPL-3.0-or-later (`psycopg2-binary`, `@img/sharp-libvips-linux-*`) | 3 | Licence text, source availability, and the ability to replace the library | Both are separately installed binaries loaded dynamically, unmodified, replaceable by reinstalling; sources linked in the notices. The libvips packages publish no licence file, so the image places the LGPL text beside them |
 | LGPL-3.0-only (`ldap3`) | 1 | Licence text, source availability, and the ability to replace the library | The directory sign-in's LDAP client, a pure-Python wheel imported unmodified and replaceable by reinstalling; its licence files ship in its dist-info and its source is linked in the notices |
 | Artistic-1.0-Perl or GPL-2.0-or-later (`text-unidecode`) | 1 | Dual; taken under the Artistic License: notice and text | The wheel's licence file ships |

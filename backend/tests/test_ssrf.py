@@ -15,6 +15,7 @@ from app.core.sanitize import (
     UrlRefusedError,
     _is_ip_blocked,
     resolve_pinned_url,
+    spelled_host,
     validate_webhook_url,
 )
 
@@ -532,3 +533,57 @@ class TestSSRFBlockedError:
     def test_catchable_as_value_error(self):
         with pytest.raises(ValueError):
             raise SSRFBlockedError("blocked")
+
+
+class TestSpelledHost:
+    """One host, spelled as `urlparse` spells the host of a URL built from it.
+
+    `resolve_pinned_url` compares `trusted_hosts` with that spelling exactly, so
+    an SFTP source's host, the host an SSH login is bound to and each
+    `SYNC_ALLOWED_HOSTS` entry are all spelled by this one function.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "spelled"),
+        [
+            ("Files-01.Corp.Example", "files-01.corp.example"),
+            (" files-01 ", "files-01"),
+            ("[2001:DB8:0:0::7]", "2001:db8::7"),
+            ("2001:db8:0::7", "2001:db8::7"),
+            ("10.0.0.5", "10.0.0.5"),
+            ("bücher.example", "xn--bcher-kva.example"),
+            ("xn--bcher-kva.example", "xn--bcher-kva.example"),
+            # DNS, the resolver and Docker's embedded DNS answer an underscore.
+            ("SFTP_Server", "sftp_server"),
+            ("files_01.corp.example", "files_01.corp.example"),
+            ("_sftp.example.com", "_sftp.example.com"),
+        ],
+    )
+    def test_a_host_is_spelled_as_a_url_s_host(self, value: str, spelled: str):
+        assert spelled_host(value) == spelled
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("files.corp:22", id="port"),
+            pytest.param("[fd00::5]:22", id="ipv6-with-port"),
+            pytest.param("sftp://files.corp", id="scheme"),
+            pytest.param("files.corp/drop", id="path"),
+            pytest.param("sync@files.corp", id="user"),
+            pytest.param("10.0.0.0/8", id="range"),
+            pytest.param("*.corp", id="wildcard"),
+            pytest.param("fe80::1%eth0", id="ipv6-zone"),
+            pytest.param("files corp", id="space-inside"),
+            pytest.param("files.corp.", id="trailing-dot"),
+            pytest.param("files..corp", id="empty-label"),
+            pytest.param("-files.corp", id="label-starting-with-a-hyphen"),
+            pytest.param("a" * 64 + ".corp", id="label-too-long"),
+            pytest.param(".".join(["a" * 60] * 5), id="name-too-long"),
+            pytest.param("", id="blank"),
+        ],
+    )
+    def test_anything_but_one_host_is_refused(self, value: str):
+        """A port, a scheme, a path, a range, a wildcard, a zone or a trailing dot
+        could match no URL's host, so none of them is one host."""
+        with pytest.raises(ValueError):
+            spelled_host(value)

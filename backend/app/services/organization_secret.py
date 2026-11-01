@@ -14,6 +14,11 @@ an OAuth client's secret to the provider's own token endpoint inside the connect
 flow and to nowhere else.
 """
 
+import asyncio
+import json
+import logging
+import sys
+import weakref
 from typing import cast
 from uuid import UUID
 
@@ -21,7 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import secret_purposes
 from app.core.audit import record_audit
-from app.core.exceptions import AlreadyExistsError, BadRequestError, NotFoundError
+from app.core.exceptions import (
+    AlreadyExistsError,
+    BadRequestError,
+    ExternalServiceError,
+    InternalError,
+    NotFoundError,
+)
+from app.core.field_errors import refused_field
 from app.core.permissions import AuthContext, Perm
 from app.core.secret_kinds import (
     ApiKeySecret,
@@ -29,6 +41,7 @@ from app.core.secret_kinds import (
     GoogleOAuthAppSecret,
     SecretKind,
     SecretValue,
+    SshCredentialsSecret,
     StorableSecret,
     describe_kind,
     seal_secret,
@@ -41,12 +54,103 @@ from app.db.models.resource_grant import Visibility
 from app.repositories import member_repo, organization_secret_repo, resource_grant_repo
 from app.schemas.resource_grant import as_visibility
 from app.schemas.secret import SecretSummary, SecretUsage
+from app.services import ssh_key_check
 from app.services.access import SECRET, accessible_ids, resolve_access, visible_resource_ids
 from app.services.notifications import NotificationService
+from app.services.ssh_key_check import KeyReport
 
 # The two credentials a connect flow spends: identical fields, separate kinds,
 # because a kind names what a credential is for.
 OAuthAppSecret = GithubOAuthAppSecret | GoogleOAuthAppSecret
+
+logger = logging.getLogger(__name__)
+
+KEY_CHECK_SECONDS = 5.0
+"""How long one child process may take to open a private key, its start included.
+
+An Ed25519 key opens in milliseconds. A key at the key derivation ceilings, or an
+RSA key of 4096 bits, opens in under two seconds, the start of the process
+included. A key that needs longer is refused.
+"""
+
+MAX_CONCURRENT_KEY_CHECKS = 2
+"""How many key checks one API process runs at once.
+
+A save that finds every slot busy is refused at once, not queued: it already
+holds a database connection, and a queue of waiting saves would hold the pool's
+connections while other requests wait for one.
+"""
+
+_KEY_CHECKS_BUSY = "Other private keys are being checked now. Try again in a moment."
+
+# Isolated mode: no environment variable, user site or working directory decides
+# what the child imports.
+_KEY_CHECK_COMMAND = (sys.executable, "-I", "-m", ssh_key_check.__name__)
+
+# One gate per event loop, because an `asyncio.Semaphore` binds to the loop that
+# first waits on it (as in `app.core.blocking`), keyed weakly so a finished
+# loop's gate goes with it.
+_key_check_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _key_check_gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    gate = _key_check_gates.get(loop)
+    if gate is None:
+        gate = asyncio.Semaphore(MAX_CONCURRENT_KEY_CHECKS)
+        _key_check_gates[loop] = gate
+    return gate
+
+
+async def _open_in_a_child(key: str, passphrase: str | None) -> KeyReport | None:
+    """Open a private key in a child process, and return its report.
+
+    `python -I -m app.services.ssh_key_check`, with an empty environment: the
+    child imports asyncssh and nothing of the application, and gets the key and
+    the passphrase on stdin, never in argv or the environment. The parent awaits
+    it with asyncio, so no thread and no event-loop time is held while the key
+    derivation or an RSA validation runs. The child is killed at
+    :data:`KEY_CHECK_SECONDS`, and whenever the request is cancelled, and is
+    reaped before its slot is released.
+
+    Returns:
+        The child's report, or `None` when it ran out of time.
+
+    Raises:
+        ExternalServiceError: With the code `SERVICE_BUSY`, the code of the
+            503 an exhausted connection pool answers, when
+            :data:`MAX_CONCURRENT_KEY_CHECKS` checks are running already.
+        InternalError: When the child failed without a report, which is a defect
+            or a starved host, never a fact about the key. Its exit status is
+            logged; its output is not, because it could quote the key.
+    """
+    gate = _key_check_gate()
+    if gate.locked():
+        raise ExternalServiceError(message=_KEY_CHECKS_BUSY, code="SERVICE_BUSY")
+    request = json.dumps({"key": key, "passphrase": passphrase}).encode()
+    async with gate:
+        child = await asyncio.create_subprocess_exec(
+            *_KEY_CHECK_COMMAND,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={},
+        )
+        try:
+            answer, _ = await asyncio.wait_for(child.communicate(request), KEY_CHECK_SECONDS)
+        except TimeoutError:
+            return None
+        finally:
+            if child.returncode is None:
+                child.kill()
+                # Shielded, so a second cancellation cannot leave the child unreaped.
+                await asyncio.shield(child.wait())
+    if child.returncode != 0:
+        logger.error("ssh_key_check_failed", extra={"returncode": child.returncode})
+        raise InternalError(message="The private key could not be checked. Try again later.")
+    return KeyReport(**json.loads(answer))
 
 
 class OrganizationSecretService:
@@ -202,10 +306,12 @@ class OrganizationSecretService:
                 secret, so two sharing one is a pair nobody can tell apart -
                 including the person about to point an agent at the wrong one.
             BadRequestError: If the purpose is not one this deployment offers,
-                or wants a different shape of credential than was given.
+                or wants a different shape of credential than was given, or an
+                SSH login's private key does not open with its passphrase.
         """
         self._check_purpose(purpose, value.kind)
         await self._refuse_duplicate_name(ctx, name)
+        await self._refuse_a_key_that_does_not_open(value)
         sealed = seal_secret(value, scope=VaultScope.organization(ctx.organization_id))
         secret = await organization_secret_repo.create(
             self.db,
@@ -261,7 +367,8 @@ class OrganizationSecretService:
 
         Raises:
             NotFoundError: If no such secret exists in this organization.
-            BadRequestError: If a rotation would change the secret's kind.
+            BadRequestError: If a rotation would change the secret's kind, or
+                an SSH login's private key does not open with its passphrase.
             AlreadyExistsError: If the new name is taken.
         """
         secret = await self._get(ctx, secret_id, perm=Perm.SECRETS_EDIT)
@@ -274,6 +381,7 @@ class OrganizationSecretService:
             update_data["description"] = description
         if value is not None:
             self._refuse_kind_change(secret, value)
+            await self._refuse_a_key_that_does_not_open(value)
             sealed = seal_secret(value, scope=VaultScope.organization(ctx.organization_id))
             update_data["sealed_secret"] = sealed.ciphertext
             update_data["hint"] = sealed.hint
@@ -621,6 +729,31 @@ class OrganizationSecretService:
                 ),
                 details={"name": name},
             )
+
+    @staticmethod
+    async def _refuse_a_key_that_does_not_open(value: StorableSecret) -> None:
+        """Refuse an SSH login whose private key does not open, or opens too slowly.
+
+        Parsing the login refused what its header shows. Opening the key costs
+        what the key asks for, and the paste chooses that, so it is opened in a
+        child process with a time limit (:func:`_open_in_a_child`), here and
+        nowhere earlier: after the caller was authorized to write this secret -
+        the route's gate for a new one, `_get` with `secrets:edit` for a
+        rotation.
+
+        Raises:
+            BadRequestError: Naming the passphrase for a passphrase that does
+                not open the key, else the key, with our sentence and never the
+                parser's.
+        """
+        if not isinstance(value, SshCredentialsSecret) or value.private_key is None:
+            return
+        passphrase = None if value.passphrase is None else value.passphrase.get_secret_value()
+        report = await _open_in_a_child(value.private_key.get_secret_value(), passphrase)
+        refusal = value.opening_refusal(report)
+        if refusal is not None:
+            field, sentence = refusal
+            raise refused_field(f"value.{field}", sentence)
 
     @staticmethod
     def _refuse_kind_change(secret: OrganizationSecret, value: StorableSecret) -> None:

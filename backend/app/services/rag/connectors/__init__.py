@@ -1,12 +1,13 @@
 """RAG sync connectors - extensible source adapters for document ingestion."""
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationInfo
 
 from app.core.secret_kinds import SecretKind, StorableSecret
 from app.services.rag.remote_names import destination_within
@@ -159,6 +160,64 @@ class ConfigRefusal(BaseModel):
     field: str | None = None
 
 
+DEFAULT_EXTENSIONS = (".pdf", ".docx", ".md", ".txt")
+MAX_EXTENSIONS = 100
+MAX_EXTENSION_CHARACTERS = 16
+_EXTENSION = re.compile(r"^\.[a-z0-9]{1,10}$")
+
+STORED_CONFIG: dict[str, bool] = {"stored": True}
+"""The validation context of a config read back from the database at sync time.
+
+A rule added for saving a config - the extension limits - is not applied to one
+saved before it, which would otherwise fail every sync until someone edits it.
+Pass it as `CONFIG_MODEL.model_validate(config, context=STORED_CONFIG)`.
+"""
+
+
+def saving(info: ValidationInfo) -> bool:
+    """Whether a field validator checks a config being saved, rather than a stored one."""
+    return not (info.context or {}).get("stored", False)
+
+
+def normalized_extensions(value: list[str], *, bounded: bool = True) -> list[str]:
+    """The file types a source reads, as its `extensions` field validator answers them.
+
+    Lower case, trimmed, with a leading dot added where it was left out, each
+    once, in the order typed, and blanks dropped. At least one, because a source
+    that reads no file type lists nothing, and a complete listing of nothing
+    removes every document the source brought in. SharePoint and SFTP filter by
+    type: a file no parser reads fails at parse, so it is stored with no revision
+    and would be downloaded and failed again on every run.
+
+    `bounded`, when a config is saved: at most `MAX_EXTENSIONS` types of at most
+    `MAX_EXTENSION_CHARACTERS` each, counted after the trim, the blanks and the
+    duplicates are gone. A stored config is not refused for them (`STORED_CONFIG`).
+    One pass, so a long list costs its length.
+
+    Raises:
+        ValueError: an entry is not a file extension, there is none, or, when
+            `bounded`, too many or one too long.
+    """
+    normalized: dict[str, None] = {}
+    for raw in value:
+        extension = raw.strip().lower()
+        if not extension:
+            continue
+        if bounded and len(extension) > MAX_EXTENSION_CHARACTERS:
+            raise ValueError(
+                f"A file type is at most {MAX_EXTENSION_CHARACTERS} characters, e.g. .pdf."
+            )
+        extension = extension if extension.startswith(".") else f".{extension}"
+        if not _EXTENSION.fullmatch(extension):
+            raise ValueError(f"{raw.strip()!r} is not a file extension, e.g. .pdf.")
+        normalized[extension] = None
+    if bounded and len(normalized) > MAX_EXTENSIONS:
+        raise ValueError(f"At most {MAX_EXTENSIONS} file types can be listed.")
+    if not normalized:
+        raise ValueError("At least one file type is needed.")
+    return list(normalized)
+
+
 class BaseSyncConnector(ABC):
     """Base class for all sync source connectors.
 
@@ -300,3 +359,6 @@ CONNECTOR_REGISTRY["git"] = GitConnector
 from app.services.rag.connectors.sharepoint import SharePointConnector
 
 CONNECTOR_REGISTRY["sharepoint"] = SharePointConnector
+from app.services.rag.connectors.sftp import SftpConnector
+
+CONNECTOR_REGISTRY["sftp"] = SftpConnector

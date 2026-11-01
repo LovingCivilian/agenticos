@@ -1,5 +1,5 @@
 ---
-source_sha: "c53ca829ee5e"
+source_sha: "ad4172510eff"
 title: "AgenticOS vs OpenCode"
 seo_title: "AgenticOS vs OpenCode: herramientas de agents open source"
 description: "OpenCode: agent de código MIT para un desarrollador. AgenticOS: plataforma Apache-2.0 para los agents de IA de una empresa, con roles, budgets y auditoría."
@@ -41,7 +41,7 @@ Los permisos de OpenCode protegen la máquina del desarrollador. AgenticOS regis
 
 ### Conocimiento más allá del repositorio { #knowledge-beyond-the-repository }
 
-OpenCode lee el repositorio y lo que devuelvan los servidores MCP. AgenticOS guarda los documentos de la empresa en [colecciones](../file-processing.md#rag-document-ingestion), con parsing por colección y sincronización desde Drive, S3, SharePoint, sitios web y git.
+OpenCode lee el repositorio y lo que devuelvan los servidores MCP. AgenticOS guarda los documentos de la empresa en [colecciones](../file-processing.md#rag-document-ingestion), con parsing por colección y sincronización desde Drive, S3, SharePoint, sitios web, git y servidores SFTP.
 
 ## Cuándo OpenCode es la herramienta adecuada { #when-opencode-is-the-right-tool }
 

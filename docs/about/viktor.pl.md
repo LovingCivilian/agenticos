@@ -1,5 +1,5 @@
 ---
-source_sha: "3f2886a77dd8"
+source_sha: "fed6596978c5"
 title: "AgenticOS vs Viktor"
 seo_title: "AgenticOS vs Viktor: self-hosted alternatywa dla Viktora"
 description: "Viktor to jeden współpracownik AI na workspace Slacka lub Teams. AgenticOS: wielu zarządzanych agentów, dowolny model i budżet per agent na twoich serwerach."
@@ -21,7 +21,7 @@ Utrzymuje zespół AgenticOS. Źródła sprawdzono 21 października 2026. Wersja
 | Gdzie działa | Chmura Viktor, domyślnie hostowana w USA | Twoja infrastruktura, z Docker Compose |
 | Źródła | Własnościowe | Apache-2.0 |
 | Modele | Modele OpenAI, Anthropic, Google i xAI do wyboru; własny klucz OpenRouter | 28 providerów, w tym Ollama i LiteLLM na twoim sprzęcie |
-| Wiedza | Pamięć workspace'u i podłączone narzędzia | Kolekcje dokumentów w twoim Postgresie, z pięcioma konektorami synchronizacji |
+| Wiedza | Pamięć workspace'u i podłączone narzędzia | Kolekcje dokumentów w twoim Postgresie, z sześcioma konektorami synchronizacji |
 | Powierzchnie | Slack, Teams, Discord, własna skrzynka e-mail, aplikacje web, desktop i mobilne, API | Czat webowy, widget, hostowana strona, HTTP API, WebSocket, Slack, Telegram, Mattermost |
 | Dostęp | Na poziomie workspace'u; jego strony różnią się w opisie dostępu opartego na rolach | Sześć ról, 33 uprawnienia i granty per zasób, w każdej organizacji |
 | Kontrola wydatków | Pula kredytów z miesięcznym limitem automatycznych doładowań; limity per użytkownik w Enterprise | Miesięczny budżet per agent i per organizacja, sprawdzany przed każdym żądaniem do modelu |
@@ -52,7 +52,7 @@ Viktor jest hostowany w USA. Jego strony różnią się w kwestii rezydencji dan
 
 ### Wiedza, którą możesz sprawdzić { #knowledge-you-can-inspect }
 
-Viktor uczy się z rozmów i podłączonych narzędzi. AgenticOS dodaje zarządzane kolekcje dokumentów: dla każdej kolekcji wybierasz [parser](../file-processing.md#parser-selection-rag) i [chunking](../file-processing.md#chunking-configuration). Możesz synchronizować z Google Drive, S3, SharePoint lub OneDrive, ze strony internetowej albo z repozytorium git. Synchronizacja [usuwa dokumenty](../howto/configure-sync-sources.md#what-a-sync-removes), których źródło już nie wymienia.
+Viktor uczy się z rozmów i podłączonych narzędzi. AgenticOS dodaje zarządzane kolekcje dokumentów: dla każdej kolekcji wybierasz [parser](../file-processing.md#parser-selection-rag) i [chunking](../file-processing.md#chunking-configuration). Możesz synchronizować z Google Drive, S3, SharePoint lub OneDrive, ze strony internetowej, z repozytorium git albo z folderu na serwerze SFTP. Synchronizacja [usuwa dokumenty](../howto/configure-sync-sources.md#what-a-sync-removes), których źródło już nie wymienia.
 
 ## Kiedy Viktor wystarczy { #when-viktor-is-enough }
 

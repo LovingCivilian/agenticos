@@ -58,17 +58,20 @@ DocumentType = StrEnum("DocumentType", {value: value for value in sorted(DOCUMEN
 class Source(StrEnum):
     """The canonical ingestion-origin values, set in code at the call site.
 
-    A closed vocabulary known at build time — the four origins the pipeline
-    stamps: an upload, the local-directory sync, and the two registered
-    connectors. A new connector adds a value here in the same commit that adds
-    the connector. Exposed as an enum on the agent tool so the model reads the
-    legal set straight out of the function schema and cannot guess wrong.
+    A closed vocabulary known at build time — the origins the pipeline stamps:
+    an upload, the local-directory sync, and the sync connectors named below.
+    The ingest stamps a synced document with its connector's type,
+    so a new connector adds a value here in the same commit that adds the
+    connector; without it, its documents carry a source the knowledge tool
+    cannot filter on. Exposed as an enum on the agent tool so the model reads
+    the legal set straight out of the function schema and cannot guess wrong.
     """
 
     UPLOAD = "upload"
     LOCAL = "local"
     GDRIVE = "gdrive"
     S3 = "s3"
+    SFTP = "sftp"
 
 
 SOURCE_VOCABULARY: frozenset[str] = frozenset(Source)

@@ -1,5 +1,5 @@
 ---
-source_sha: "445f16218979"
+source_sha: "7f25591fa46d"
 ---
 
 # Lizenzen und Drittanbieter-Hinweise { #licences-and-third-party-notices }
@@ -48,10 +48,18 @@ Zwei Dateien tragen es, und ein Skript hält sie ehrlich.
 **[`THIRD_PARTY_NOTICES.md`](https://github.com/vstorm-co/agenticos/blob/main/THIRD_PARTY_NOTICES.md)**
 wird generiert und eingecheckt. Für jede Distribution in einem der beiden Images
 hält die Datei Namen, Version, SPDX-Lizenzausdruck, Quell-URL und den Nachweis
-fest, aus dem die Lizenz gelesen wurde: einen `License-Expression`-Header, einen
-Classifier, den Text der Lizenzdatei selbst, den Paketindex oder ein Override, das
-jemand festgehalten hat. Sie listet außerdem die offenen Befunde zuerst, eine Zahl
-der Komponenten pro Lizenz und die von Hand erfassten Komponenten.
+fest, aus dem die Lizenz gelesen wurde: einen `License-Expression`-Header, das
+Feld `License`, einen Classifier, den Text der Lizenzdatei selbst, den Paketindex
+oder ein Override, das jemand festgehalten hat. Sie listet außerdem die offenen
+Befunde zuerst, eine Zahl der Komponenten pro Lizenz und die von Hand erfassten
+Komponenten.
+
+Ein `License`-Feld, das ein gültiger SPDX-Ausdruck ist, liest das Skript als
+solchen, vor den Classifiern und der Lizenzdatei. Ein Ausdruck mit einer
+veralteten SPDX-id wie `GPL-2.0+` oder `LGPL-2.1` oder mit einem `+` nach einer
+`-only`- oder `-or-later`-id wird nicht übernommen, weil kein Policy-Set diese ids
+nennt. Für ein solches Feld liest das Skript wie bisher die bekannten
+Schreibweisen des Feldes, die Classifier und die Lizenzdatei.
 
 **`licenses/policy.toml`** hält die Entscheidungen. Ein `override`-Eintrag ist die
 Lizenz, die jemand für eine Komponente bestimmt hat, deren Metadaten dazu
@@ -116,7 +124,8 @@ Notices-Datei ist die aktuelle Zahl.
 | MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, MIT-0, MIT-CMU, Unlicense | rund 400 | Copyright-Hinweis und Lizenztext bei Kopien mitführen | Die eigene Lizenzdatei jedes Pakets wird im Image neben dem Code ausgeliefert: das `*.dist-info/` jedes Wheels im Backend-Image, die Lizenzdatei jedes Pakets unter `/app/licenses/node_modules/<name>/` im Frontend-Image. Die Notices indexieren sie |
 | Apache-2.0 | rund 90 | Der Lizenztext, ein Hinweis auf Änderungen, jede `NOTICE`-Datei, die das Paket mitführt | Wie oben; nichts wird verändert, es gibt also keine Änderungen, auf die hinzuweisen wäre |
 | PSF-2.0, CNRI-Python, Zlib, CC0-1.0 | ein paar | Namensnennung oder nichts | Wie oben |
-| MPL-2.0 (`bidict`, `certifi`, `pathspec`, `tqdm`, Teil von `orjson`) | 5 | Copyleft auf Dateiebene: Die erfassten Dateien bleiben unter der MPL, und ihr Quellcode ist verfügbar | Unverändert genutzt; der Lizenztext wird ausgeliefert; die Notices verlinken den Quellcode |
+| MPL-2.0 (`bidict`, `certifi`, `pathspec`, Teil von `orjson`) und MPL-2.0 AND MIT (`tqdm`) | 5 | Copyleft auf Dateiebene: Die erfassten Dateien bleiben unter der MPL, und ihr Quellcode ist verfügbar. Die MIT-Teile von `tqdm` behalten ihren Hinweis | Unverändert genutzt. Der Lizenztext wird ausgeliefert, und die eine Lizenzdatei von `tqdm` trägt beide Texte. Die Notices verlinken den Quellcode |
+| EPL-2.0 OR GPL-2.0-or-later (`asyncssh`) | 1 | Dual; unter EPL-2.0 genommen, ohne die GPL als Secondary License. Copyleft auf Dateiebene: der Lizenztext, die Hinweise in seinen Dateien und der Ort seines Quellcodes. Ein Deployment, das es in ein kommerzielles Produktangebot aufnimmt, übernimmt außerdem die Freistellungspflicht der EPL für seine eigenen Gewährleistungen (Abschnitt 4) | Der SSH-Client des SFTP-Sync-Connectors, der auch den Schlüssel eines SSH-Logins im Vault prüft. Ein reines Python-Wheel, unverändert importiert. Der EPL-2.0-Text liegt in seiner dist-info, seine `.py`-Dateien sind sein Quellcode mit unversehrten Headern, und die Notices verlinken den Quellcode. Sein Copyleft reicht nur in veränderte asyncssh-Dateien, die eigene Lizenz von AgenticOS ändert sich also nicht |
 | LGPL-3.0-or-later (`psycopg2-binary`, `@img/sharp-libvips-linux-*`) | 3 | Lizenztext, Verfügbarkeit des Quellcodes und die Möglichkeit, die Bibliothek zu ersetzen | Beide sind separat installierte Binaries, dynamisch geladen, unverändert, durch Neuinstallation ersetzbar; die Quellen sind in den Notices verlinkt. Die libvips-Pakete veröffentlichen keine Lizenzdatei, deshalb legt das Image den LGPL-Text daneben |
 | LGPL-3.0-only (`ldap3`) | 1 | Lizenztext, Verfügbarkeit des Quellcodes und die Möglichkeit, die Bibliothek zu ersetzen | Der LDAP-Client der Verzeichnisanmeldung, ein reines Python-Wheel, unverändert importiert und durch Neuinstallation ersetzbar; seine Lizenzdateien liegen in seiner dist-info, und sein Quellcode ist in den Notices verlinkt |
 | Artistic-1.0-Perl oder GPL-2.0-or-later (`text-unidecode`) | 1 | Dual; unter der Artistic License genommen: Hinweis und Text | Die Lizenzdatei des Wheels wird ausgeliefert |

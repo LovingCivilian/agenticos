@@ -53,18 +53,22 @@ from typing import ClassVar
 from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator
 
 from app.core.config import settings
 from app.core.exceptions import AppException, BadRequestError, ExternalServiceError, NotFoundError
 from app.core.secret_kinds import EntraAppSecret, SecretKind, StorableSecret
 from app.services.rag.connectors import (
+    DEFAULT_EXTENSIONS,
+    STORED_CONFIG,
     BaseSyncConnector,
     ConfigRefusal,
     ConnectorConfig,
     RemoteFile,
     RemoteListing,
     WithdrawnFile,
+    normalized_extensions,
+    saving,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,10 +88,8 @@ _MAX_REDIRECTS = 3
 _TOKEN_MARGIN = 300.0
 _PAGE_SIZE = 200
 _MIB = 1024 * 1024
-DEFAULT_EXTENSIONS = (".pdf", ".docx", ".md", ".txt")
 _SITE_HOST = re.compile(r"^[a-z0-9][a-z0-9-]*\.sharepoint\.com$")
 _SITE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
-_EXTENSION = re.compile(r"^\.[a-z0-9]{1,10}$")
 # What SharePoint refuses in a file or folder name, plus control characters.
 _NAME_FORBIDDEN = re.compile(r'["*:<>?\\|\x00-\x1f\x7f]')
 # Ids Graph hands out for sites (`host,guid,guid`), drives (`b!...`) and items.
@@ -197,20 +199,8 @@ class SharePointConfig(BaseModel):
 
     @field_validator("extensions")
     @classmethod
-    def _extensions(cls, value: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for raw in value:
-            extension = raw.strip().lower()
-            if not extension:
-                continue
-            extension = extension if extension.startswith(".") else f".{extension}"
-            if not _EXTENSION.fullmatch(extension):
-                raise ValueError(f"{raw.strip()!r} is not a file extension, e.g. .pdf.")
-            if extension not in normalized:
-                normalized.append(extension)
-        if not normalized:
-            raise ValueError("At least one file type is needed.")
-        return normalized
+    def _extensions(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        return normalized_extensions(value, bounded=saving(info))
 
     def site_address(self) -> str:
         """The site in Graph's path addressing: `sites/{host}` or `sites/{host}:/{path}`."""
@@ -621,7 +611,7 @@ class SharePointConnector(BaseSyncConnector):
         a fresh link, taken *before* the listing, so a change made while the
         listing runs is reported to the next run rather than lost between them.
         """
-        parsed = SharePointConfig.model_validate(config)
+        parsed = SharePointConfig.model_validate(config, context=STORED_CONFIG)
         graph = self._session(credential)
         drive_id = await self._drive_id(graph, parsed)
         drive_part, _, link = (previous or "").partition(" ")
@@ -646,7 +636,7 @@ class SharePointConnector(BaseSyncConnector):
         because of one refusal would empty part of the collection. The
         configured folder itself failing raises, since there is nothing to list.
         """
-        parsed = SharePointConfig.model_validate(config)
+        parsed = SharePointConfig.model_validate(config, context=STORED_CONFIG)
         graph = self._session(credential)
         drive_id = await self._drive_id(graph, parsed)
         start = await self._start_folder(graph, drive_id, parsed)

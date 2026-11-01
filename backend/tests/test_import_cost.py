@@ -25,6 +25,7 @@ DEFERRED = {
     "docx": "parsing a .docx",
     "boto3": "an S3 source",
     "google.oauth2": "signing a Google Drive service account token",
+    "asyncssh": "an SFTP source, and checking an SSH key as it is stored",
 }
 
 

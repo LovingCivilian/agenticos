@@ -204,3 +204,182 @@ class TestMcpAllowedHosts:
         hosts = Settings(_env_file=None, MCP_ALLOWED_HOSTS=[entry]).MCP_ALLOWED_HOSTS
 
         assert hosts == [entry]
+
+
+# Every entry that neither allowlist may hold: the entries of the two MCP refusal
+# tests above. One list for both settings, so their two validators cannot drift.
+UNLISTABLE_HOSTS = [
+    "169.254.169.254",
+    "[fe80::1]",
+    "fe80::1",
+    "metadata.google.internal",
+    "Metadata.Google.Internal.",
+    " instance-data ",
+    "100.100.100.200",
+    "fd00:ec2::254",
+    "2852039166",
+    "0xa9fea9fe",
+    "::ffff:169.254.169.254",
+    # A metadata address outside link-local, in its IPv4-mapped IPv6 form.
+    "::ffff:100.100.100.200",
+    "localhost",
+    "LOCALHOST.",
+    "api.localhost",
+    "127.0.0.1",
+    "127.1",
+    "[::1]",
+    "0.0.0.0",
+    "::ffff:127.0.0.1",
+]
+
+
+def _full_width(text: str) -> str:
+    """`text` with each ASCII letter and digit in its full-width form."""
+    return "".join(chr(ord(c) + 0xFEE0) if c.isascii() and c.isalnum() else c for c in text)
+
+
+# Entries that read as a metadata host or a loopback or link-local address once
+# folded as a resolver folds them, and as none of them as written.
+COMPATIBILITY_SPELLINGS = [
+    pytest.param(_full_width("localhost"), id="full-width-localhost"),
+    pytest.param(_full_width("METADATA") + ".google.internal", id="full-width-metadata"),
+    pytest.param(_full_width("127.0.0.1"), id="full-width-loopback"),
+    pytest.param(_full_width("169.254.169.254"), id="full-width-link-local"),
+    pytest.param("local\u00adhost", id="soft-hyphen"),
+    pytest.param("meta\u200bdata", id="zero-width-space"),
+]
+
+
+class TestSyncAllowedHosts:
+    """Hosts an SFTP source may name although they resolve inside the network.
+
+    Read from the environment as a JSON list, as `MCP_ALLOWED_HOSTS` is, and
+    refused on the same entries. `_env_file=None` keeps a developer's
+    `backend/.env` out of the answer.
+    """
+
+    def test_a_deployment_that_never_set_it_lists_no_sync_host(self, monkeypatch):
+        """Empty keeps every internal address refused, so it is the default. An
+        operator must not have to remember to write it."""
+        monkeypatch.delenv("SYNC_ALLOWED_HOSTS", raising=False)
+
+        assert Settings(_env_file=None).SYNC_ALLOWED_HOSTS == []
+
+    def test_the_environment_names_the_sync_hosts_as_a_json_list(self, monkeypatch):
+        monkeypatch.setenv("SYNC_ALLOWED_HOSTS", '["files-01", "10.0.0.5"]')
+
+        assert Settings(_env_file=None).SYNC_ALLOWED_HOSTS == ["files-01", "10.0.0.5"]
+
+    @pytest.mark.security
+    @pytest.mark.parametrize("entry", UNLISTABLE_HOSTS)
+    def test_a_metadata_link_local_or_loopback_sync_host_stops_the_settings_loading(self, entry):
+        """A listed host may resolve inside the network. A metadata address is never
+        a file server, only the instance's credentials, and loopback is the API's
+        own host. Refused however the entry is spelled."""
+        with pytest.raises(ValidationError) as refused:
+            Settings(_env_file=None, SYNC_ALLOWED_HOSTS=[entry])
+
+        message = refused.value.errors()[0]["msg"]
+        assert "a cloud metadata, link-local or loopback address" in message
+        assert "A listed host may resolve inside the network, so remove it." in message
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "files-01",
+            "10.0.0.5",
+            "fd00::1",
+            "100.64.0.5",
+            "[fd00::5]",
+            "FILES.corp",
+            "bücher.corp",
+            # A Compose service's name: DNS and Docker resolve an underscore.
+            "sftp_server",
+        ],
+    )
+    def test_a_private_sync_host_is_allowed(self, entry):
+        """A file server on the company network is the reason the setting exists.
+        The entry is kept as written: the connector spells it when it reads it."""
+        hosts = Settings(_env_file=None, SYNC_ALLOWED_HOSTS=[entry]).SYNC_ALLOWED_HOSTS
+
+        assert hosts == [entry]
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            pytest.param("files.corp.", id="trailing-dot"),
+            pytest.param("files.corp:22", id="port"),
+            pytest.param("[fd00::5]:22", id="ipv6-with-port"),
+            pytest.param("10.0.0.0/8", id="cidr-range"),
+            pytest.param("sftp://files.corp", id="scheme"),
+            pytest.param("files.corp/drop", id="path"),
+            pytest.param("*.corp", id="wildcard"),
+            pytest.param("fd00::5%eth0", id="ipv6-zone"),
+            pytest.param("files corp", id="space"),
+            pytest.param("", id="blank"),
+        ],
+    )
+    def test_a_sync_host_that_is_not_one_host_stops_the_settings_loading(self, entry):
+        """The connector compares an entry, spelled as a source's host is, with
+        the source's host. An entry that is not one host matches no source, so
+        it would be listed as open in the data-protection report while the
+        source it was meant for stays refused. The sentence names the entry
+        and how to write it."""
+        with pytest.raises(ValidationError) as refused:
+            Settings(_env_file=None, SYNC_ALLOWED_HOSTS=[entry])
+
+        message = refused.value.errors()[0]["msg"].removeprefix("Value error, ")
+        assert message == (
+            f"SYNC_ALLOWED_HOSTS lists {entry!r}, which is not one host. Write a host name or "
+            "an IP address alone, e.g. files-01 or 10.0.0.5, with no port, scheme, path, "
+            "range, wildcard or trailing dot."
+        )
+
+    @pytest.mark.security
+    @pytest.mark.parametrize("entry", COMPATIBILITY_SPELLINGS)
+    def test_a_metadata_or_loopback_host_in_another_spelling_stops_the_settings_loading(
+        self, entry
+    ):
+        """The connector spells an entry before it trusts it, and spelling folds
+        full-width letters and digits, soft hyphens and zero-width spaces the way
+        the resolver reads them. So the entry is checked as the connector will
+        trust it, and refused as it was written."""
+        with pytest.raises(ValidationError) as refused:
+            Settings(_env_file=None, SYNC_ALLOWED_HOSTS=[entry])
+
+        message = refused.value.errors()[0]["msg"].removeprefix("Value error, ")
+        assert message == (
+            f"SYNC_ALLOWED_HOSTS lists {entry!r}, a cloud metadata, link-local or loopback "
+            "address. A listed host may resolve inside the network, so remove it."
+        )
+
+    @pytest.mark.parametrize(
+        "entry", ["files.corp.", "files.corp:22", "*.corp", "sftp_server", *COMPATIBILITY_SPELLINGS]
+    )
+    def test_the_mcp_allowlist_keeps_its_own_matching(self, entry):
+        """The rule is the sync list's. `MCP_ALLOWED_HOSTS` matches its entries in
+        its own way, and what it loaded before, it still loads."""
+        hosts = Settings(_env_file=None, MCP_ALLOWED_HOSTS=[entry]).MCP_ALLOWED_HOSTS
+
+        assert hosts == [entry]
+
+    @pytest.mark.security
+    @pytest.mark.parametrize("entry", UNLISTABLE_HOSTS)
+    def test_both_allowlists_refuse_the_same_entries(self, entry):
+        """The two settings share one rule. Each refusal names its own setting and
+        its own consequence, so the operator knows which variable to correct and
+        why. The MCP sentence is the one it had before the rule was shared, to
+        the character."""
+        for setting, consequence in (
+            ("MCP_ALLOWED_HOSTS", "A listed host skips the SSRF check, so remove it."),
+            ("SYNC_ALLOWED_HOSTS", "A listed host may resolve inside the network, so remove it."),
+        ):
+            with pytest.raises(ValidationError) as refused:
+                Settings(_env_file=None, **{setting: [entry]})
+
+            message = refused.value.errors()[0]["msg"].removeprefix("Value error, ")
+            assert message == (
+                f"{setting} lists {entry!r}, a cloud metadata, link-local or loopback "
+                f"address. {consequence}"
+            )

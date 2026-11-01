@@ -205,6 +205,15 @@ dependencies = [
     # that grows past its limit is stopped and the parent says why. `/proc` alone
     # would do on Linux and nowhere else.
     "psutil>=7.0",
+    # The SFTP sync connector's client (#29), and the check of an SSH key as the
+    # vault stores it. The floor is two advisories: GHSA-rw4j-r22c-9gc3 (a server
+    # can stop the client's event loop, fixed in 2.24.0) and GHSA-q8m6-9rfx-39rf
+    # (recursive copies write where the server's names say, fixed in 2.24.1).
+    # Advisory databases did not carry the second on 2026-10-29, so an audit would
+    # not catch a downgrade - this floor is the guard. `bcrypt` is already a direct
+    # dependency. The extra says why an encrypted OpenSSH key opens.
+    # EPL-2.0 OR GPL-2.0-or-later: the decision is in `licenses/policy.toml`.
+    "asyncssh[bcrypt]>=2.24.1",
 ]
 
 [project.optional-dependencies]
@@ -648,6 +657,8 @@ include = [
     "app/services/rag/connectors/web_page.py",
     # Which host is sent the Entra app's secret, its Graph token or neither.
     "app/services/rag/connectors/sharepoint.py",
+    # Which host is sent the SSH login, and what a server it chose may send back.
+    "app/services/rag/connectors/sftp.py",
     # The query strings a knowledge search runs, and the one place an expansion
     # failure is allowed to fall back to the plain query (#1649).
     "app/services/rag/query_analysis.py",
@@ -804,6 +815,8 @@ include = [
     # through publish (#2487).
     "app/services/model_outputs.py",
     "app/services/organization_secret.py",
+    # The child process that opens a pasted SSH private key before it is stored.
+    "app/services/ssh_key_check.py",
     "app/services/openai_codex.py",
     # Same shape and the same reason as `image_models`: what a picker offers is
     # decided by filtering a data file against what the platform can actually
@@ -1151,6 +1164,8 @@ include = [
     "app/services/rag/connectors/web_page.py",
     # Which host is sent the Entra app's secret, its Graph token or neither.
     "app/services/rag/connectors/sharepoint.py",
+    # Which host is sent the SSH login, and what a server it chose may send back.
+    "app/services/rag/connectors/sftp.py",
     # The query strings a knowledge search runs, and the one place an expansion
     # failure is allowed to fall back to the plain query (#1649).
     "app/services/rag/query_analysis.py",
@@ -1340,6 +1355,8 @@ include = [
     # through publish (#2487).
     "app/services/model_outputs.py",
     "app/services/organization_secret.py",
+    # The child process that opens a pasted SSH private key before it is stored.
+    "app/services/ssh_key_check.py",
     "app/services/openai_codex.py",
     # Same shape and the same reason as `image_models`: what a picker offers is
     # decided by filtering a data file against what the platform can actually

@@ -2,7 +2,7 @@
 title: "AgenticOS vs Sauna"
 seo_title: "AgenticOS vs Sauna: eine selbst gehostete Alternative"
 description: "Sauna ist ein proaktiver KI-Assistent pro Person, in ihrer Cloud. AgenticOS: viele kontrollierte Agents, jedes Modell und Budgets pro Agent auf Ihren Servern."
-source_sha: "e589e2dd5acb"
+source_sha: "f611068c9f7e"
 ---
 
 # AgenticOS vs Sauna { #agenticos-vs-sauna }
@@ -21,7 +21,7 @@ Gepflegt vom AgenticOS-Team. Quellen geprüft am 21. Oktober 2026. AgenticOS-Bas
 | Wo es läuft | Die Cloud von Sauna; US-Infrastruktur für US-Kunden, und Daten können in den USA verarbeitet werden | Ihre Infrastruktur, mit Docker Compose |
 | Quellcode | Proprietär | Apache-2.0 |
 | Modelle | Das Modell Sauna Lite im Tarif Lite; alle Modelle ab Basic; eigene Modelle ab Pro | 28 Provider, darunter Ollama und LiteLLM auf Ihrer eigenen Hardware |
-| Wissen | Abgelegte Dateien, ein Gedächtnis, das er aufbaut, und verbundene Tools | Dokumentsammlungen in Ihrem Postgres, mit Parsing und Chunking nach Ihrer Wahl und fünf Sync-Konnektoren |
+| Wissen | Abgelegte Dateien, ein Gedächtnis, das er aufbaut, und verbundene Tools | Dokumentsammlungen in Ihrem Postgres, mit Parsing und Chunking nach Ihrer Wahl und sechs Sync-Konnektoren |
 | Oberflächen | Web-App, iOS-App, iMessage, Slack, Gmail, Superhuman, E-Mail | Web-Chat, Widget, gehostete Seite, HTTP-API, WebSocket, Slack, Telegram, Mattermost |
 | Teilen | Standardmäßig privat; Freigabe für ausgewählte Personen und ein gemeinsames Unternehmensgehirn im Tarif Team | Sechs Rollen, 33 Berechtigungen und Grants pro Ressource, pro Organisation |
 | Autonomie | Konfigurierbar, vom Vorschlagen von Aktionen bis zum selbstständigen Handeln | Freigaben pro Capability, pro Werkzeug und pro MCP-Verbindung, entschieden von einer Person mit `approvals:decide` |
@@ -52,7 +52,7 @@ Bei Sauna legen Sie fest, wie viel es ohne Sie tun darf. In AgenticOS [hält ein
 
 ### Wissen, das Sie prüfen können { #knowledge-you-can-inspect }
 
-Sauna behält die Dateien, die Sie ablegen, und greift beim Arbeiten darauf zurück. AgenticOS ergänzt verwaltete Dokumentsammlungen: Sie wählen [Parser](../file-processing.md#parser-selection-rag) und [Chunking](../file-processing.md#chunking-configuration) pro Sammlung. Sie können aus Google Drive, S3, SharePoint oder OneDrive, einer Website oder einem Git-Repository synchronisieren.
+Sauna behält die Dateien, die Sie ablegen, und greift beim Arbeiten darauf zurück. AgenticOS ergänzt verwaltete Dokumentsammlungen: Sie wählen [Parser](../file-processing.md#parser-selection-rag) und [Chunking](../file-processing.md#chunking-configuration) pro Sammlung. Sie können aus Google Drive, S3, SharePoint oder OneDrive, einer Website, einem Git-Repository oder einem Ordner auf einem SFTP-Server synchronisieren.
 
 ## Wann Sauna genügt { #when-sauna-is-enough }
 

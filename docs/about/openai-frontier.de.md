@@ -2,7 +2,7 @@
 title: "AgenticOS vs OpenAI Frontier"
 seo_title: "AgenticOS vs OpenAI Frontier: eine Open-Source-Alternative"
 description: "OpenAI Frontier verwaltet KI-Kollegen im Unternehmen auf Modellen von OpenAI. Vergleichen Sie AgenticOS: Open Source, jedes Modell, betrieben auf Ihren Servern."
-source_sha: "22f62b5b3fff"
+source_sha: "7cf34e2d8604"
 ---
 
 # AgenticOS vs OpenAI Frontier { #agenticos-vs-openai-frontier }
@@ -21,7 +21,7 @@ Gepflegt vom AgenticOS-Team. Quellen geprüft am 14. Oktober 2026. AgenticOS-Bas
 | Wo es läuft | Lokal, in Ihrer Cloud oder bei OpenAI | Ihre Infrastruktur, mit Docker Compose |
 | Quellcode | Proprietär | Apache-2.0 |
 | Modelle | OpenAI | 28 Provider, darunter lokale Modelle |
-| Unternehmenskontext | Anbindung an CRMs und Data Warehouses | Wissensdatenbanken, synchronisiert aus Drive, S3, SharePoint, OneDrive, Websites und Git; über 4.700 MCP-Server |
+| Unternehmenskontext | Anbindung an CRMs und Data Warehouses | Wissensdatenbanken, synchronisiert aus Drive, S3, SharePoint, OneDrive, Websites, Git und SFTP-Servern; über 4.700 MCP-Server |
 | Steuerung | Berechtigungen pro Agent, Evaluierungen, Dashboards | Rollen und Grants pro Ressource, Freigaben, Budgets vor jeder Modellanfrage, ein manipulationssicheres Audit-Log |
 | Preise | Nicht veröffentlicht | Keine Lizenzgebühr; Sie bezahlen Modell-Provider und Infrastruktur |
 

@@ -1,5 +1,5 @@
 ---
-source_sha: "54fd188fd445"
+source_sha: "bcc6b38e2737"
 ---
 
 # Dateiverarbeitung { #file-processing }
@@ -1236,8 +1236,9 @@ Die Revision ist die einzige Stelle, an der die beiden Flows verschiedene
 Antworten geben können. Der lokale Sync erkennt eine unveränderte Datei nur an
 ihrem Hash, und diese Prüfung ist exakt. Eine exakte Revision, etwa ein S3-`ETag`
 oder eine Git-Blob-Sha, gibt dieselbe Antwort wie der Hash. Eine Revision, die
-eine Änderung übersehen kann, etwa Größe und Änderungszeit, kann `new_only` und
-`update_only` eine seltene Bearbeitung überspringen lassen. `full` ist die
+eine Änderung übersehen kann, etwa die Größe und die Änderungszeit, die ein
+SFTP-Server für eine Datei meldet, kann `new_only` und `update_only` eine
+seltene Bearbeitung überspringen lassen. `full` ist die
 Abhilfe: Es lädt jede Datei herunter und liest sie neu ein. Ein Connector, dessen
 Revision eine Änderung übersehen kann, sagt das in seinem Docstring.
 
@@ -1347,8 +1348,9 @@ seiner eigenen Shell ausführt.
     wird.
 
 Was die Source in `secret_id` nennt, ist ein `gcp_service_account` für Drive,
-ein `aws_credentials`-Paar für S3 oder ein `git_token` für ein Git-Repository,
-vom Connector als `SECRET_KIND` deklariert und dem Assistenten als `secret_kind`
+ein `aws_credentials`-Paar für S3, ein `git_token` für ein Git-Repository, eine
+`entra_app` für SharePoint oder ein `ssh_credentials`-Login für einen
+SFTP-Server, vom Connector als `SECRET_KIND` deklariert und dem Assistenten als `secret_kind`
 in der Connector-Auflistung angeboten.
 
 Früher stand es in `config`, verschlüsselt von `app/core/crypto.py` — ein
@@ -1368,8 +1370,9 @@ Dinge:
   Service-Account ist ein mehrfeldriges Formular, dessen ehrlicher Platz der Vault
   ist.
 - **Der Service lehnt eine Konfiguration ab, die Zugangsdaten trägt.** Die alten
-  Feldnamen zu posten wird mit "a credential does not go in a source's
-  configuration" beantwortet, statt verworfen zu werden, sodass die Source
+  Feldnamen oder `password`, `private_key` oder `passphrase` eines SSH-Logins zu
+  posten wird mit "a credential does not go in a source's configuration"
+  beantwortet, statt verworfen zu werden, sodass die Source
   gespeichert wird und sich dann nicht authentifizieren kann.
 
 Gelesen wird es dort, wo es eine Session und einen Tenant gibt: der Worker
@@ -1576,7 +1579,9 @@ eines Git-Repositories
 und GCS, deren Bedingung erfüllt ist: `S3Connector` ist eine Unterklasse von
 `ObjectStoreConnector`, jeder davon ist also ein Client und ein `CONNECTOR_TYPE`
 statt einer zweiten Kopie der Auflistungsschleife
-([#988](https://github.com/vstorm-co/agenticos/issues/988)).
+([#988](https://github.com/vstorm-co/agenticos/issues/988)). Einen Ordnerbaum auf
+einem SFTP-Server liest der `sftp`-Connector - siehe [SFTP
+einrichten](howto/configure-sync-sources.md#sftp-setup).
 
 Gegen Notion, Slack und E-Mail-Archive ist vorerst **entschieden**, jeweils aus einem dort
 festgehaltenen Grund — die letzten beiden, weil eine Unterhaltung sich schlecht

@@ -37,11 +37,21 @@ from app.schemas.sync_source import (
 )
 from app.worker.jobs import SYNC_SOURCE, Priority, SyncConnectorSource, sync_source_key
 
-# The credential field names the two shipped connectors used to hold in `config`.
-# Kept as a list so a caller posting the old shape is told what to do instead of
-# having the value silently dropped (#937).
-_RETIRED_CREDENTIAL_FIELDS = frozenset(
-    {"service_account_json", "access_key_id", "secret_access_key"}
+# Names a credential goes under, and never in `config`. The first three are the
+# fields the two shipped connectors used to hold there, kept so a caller posting
+# the old shape is told what to do instead of having the value silently dropped
+# (#937). The last three are an SSH login's: SFTP is the first connector whose
+# users hold a password, and one posted in the config would sit in plaintext in a
+# JSONB column while the source still could not log in.
+_CREDENTIAL_FIELDS = frozenset(
+    {
+        "service_account_json",
+        "access_key_id",
+        "secret_access_key",
+        "password",
+        "private_key",
+        "passphrase",
+    }
 )
 
 
@@ -61,7 +71,7 @@ async def _refuse_a_credential_in_the_config(config: dict, connector_type: str) 
     if cls is None:
         return
     known = set(cls.CONFIG_MODEL.model_fields)
-    offending = sorted(name for name in _RETIRED_CREDENTIAL_FIELDS if name in config)
+    offending = sorted(name for name in _CREDENTIAL_FIELDS if name in config)
     unknown = sorted(name for name in offending if name not in known)
     if not unknown:
         return

@@ -1,5 +1,5 @@
 ---
-source_sha: "3b14d176991a"
+source_sha: "e16b0e536348"
 title: "AgenticOS vs Claude Code"
 seo_title: "AgenticOS vs Claude Code: Firmen-Agents oder Coding-Agent"
 description: "Claude Code ist ein Coding-Agent für Entwickler, AgenticOS eine Open-Source-Plattform für KI-Agents im Unternehmen. Die Unterschiede und wie Sie beide nutzen."
@@ -45,7 +45,7 @@ Claude Code nutzt Claude-Modelle. AgenticOS lässt jeden Agent das Modell nutzen
 
 ### Unternehmenswissen, nicht nur das Repository { #company-knowledge-not-only-the-repository }
 
-Der Kontext von Claude Code stammt aus dem Repository, aus CLAUDE.md-Dateien, Skills und MCP-Servern. AgenticOS ergänzt verwaltete [Dokumentensammlungen](../file-processing.md#rag-document-ingestion) mit Synchronisierung aus Drive, S3, SharePoint, Websites und Git sowie [Skills](../skills.md) und [Kontextdateien](../context.md), die über Agents hinweg geteilt werden.
+Der Kontext von Claude Code stammt aus dem Repository, aus CLAUDE.md-Dateien, Skills und MCP-Servern. AgenticOS ergänzt verwaltete [Dokumentensammlungen](../file-processing.md#rag-document-ingestion) mit Synchronisierung aus Drive, S3, SharePoint, Websites, Git und SFTP-Servern sowie [Skills](../skills.md) und [Kontextdateien](../context.md), die über Agents hinweg geteilt werden.
 
 ## Wann Claude Code das richtige Werkzeug ist { #when-claude-code-is-the-right-tool }
 

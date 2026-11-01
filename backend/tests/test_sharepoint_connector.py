@@ -339,6 +339,78 @@ class TestTheConfig:
         assert refusal.field == "extensions"
         assert says in refusal.message
 
+    @pytest.mark.parametrize(
+        ("extensions", "says"),
+        [
+            pytest.param([f".e{number:03d}" for number in range(101)], "At most 100", id="101"),
+            pytest.param(
+                [".pdf", ".abcdefghijklmnop"], "at most 16 characters", id="17-characters"
+            ),
+        ],
+    )
+    async def test_a_list_of_file_types_is_bounded_and_the_field_named(
+        self, extensions: list[str], says: str
+    ) -> None:
+        """The form is checked on the API's request loop, and a request body may carry
+        a list of a million file types, each of any length. A config saved takes at
+        most 100 of at most 16 characters each, counted in one pass once they are
+        trimmed and merged."""
+        refusal = await SharePointConnector().validate_config(
+            {"site_url": SITE, "extensions": extensions}
+        )
+
+        assert refusal is not None
+        assert refusal.field == "extensions"
+        assert says in refusal.message
+
+    async def test_a_list_within_the_bounds_once_trimmed_and_deduplicated_is_taken(self) -> None:
+        """The limits count file types, not entries: a padded entry, a blank one and
+        repeats are trimmed, dropped and merged first."""
+        extensions = [".pdf"] * 150 + ["   .docx          ", " " * 20]
+
+        assert (
+            await SharePointConnector().validate_config(
+                {"site_url": SITE, "extensions": extensions}
+            )
+            is None
+        )
+
+    async def test_a_stored_config_over_the_limits_still_syncs_and_a_saved_one_does_not(
+        self,
+    ) -> None:
+        """The limits came after sources were saved. A stored config the old rule took
+        - 150 types, padded, blank and repeated entries - is read at sync time as it
+        was, and lists; the same config saved now is refused, with the field named."""
+        extensions = [
+            *(f".e{number:03d}" for number in range(146)),
+            "   .md          ",
+            ".PDF",
+            ".pdf",
+            " " * 20,
+            "docx",
+            ".txt",
+        ]
+        config = {"site_url": SITE, "extensions": extensions}
+
+        connector = _connector(_handbook())
+        version = await connector.remote_version(config, CREDENTIAL, None)
+        listing = await connector.list_files(config, CREDENTIAL)
+        refusal = await SharePointConnector().validate_config(config)
+
+        assert version.startswith(f"{DRIVE} ")
+        assert _names(listing.files) == {"Welcome.md", "Handbook.pdf", "leave.DOCX", "laptops.txt"}
+        assert refusal is not None
+        assert refusal.field == "extensions"
+        assert "At most 100" in refusal.message
+
+    def test_a_list_at_the_bounds_is_taken(self) -> None:
+        extensions = [f".e{number:03d}" for number in range(99)] + [" " * 11 + ".docx"]
+
+        config = SharePointConfig(site_url=SITE, extensions=extensions)
+
+        assert len(config.extensions) == 100
+        assert config.extensions[-1] == ".docx"
+
     def test_it_is_registered_and_asks_for_an_entra_app(self) -> None:
         assert CONNECTOR_REGISTRY["sharepoint"] is SharePointConnector
         assert SharePointConnector.SECRET_KIND.value == "entra_app"

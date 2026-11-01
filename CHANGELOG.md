@@ -30,9 +30,60 @@ Two things are versioned separately from this file and worth knowing about:
   more time, to store its revision. It also rewrites the metadata of every chunk
   of each unchanged document once, so it is slower on a large collection. Run
   `VACUUM (ANALYZE)` on the collection tables after it.
+- **A folder on an SFTP server can feed a knowledge base.** An `sftp` sync
+  source reads a folder tree over SSH, with the server's host key pinned in its
+  settings. It reads PDF, Word, Markdown and plain text by default, and a file
+  deleted from the folder is removed like any other the source stops listing.
+  Links and special files are never listed. The listing reads up to 4 folders
+  at once. Fixed bounds on the listing, on each request and on each download
+  protect the worker from a broken or hostile server, and compression is off.
+- **A link put in an SFTP folder can make a download read another file.** SFTP
+  cannot open a path without following a link, so confine the source's account
+  on the server: it reads only what may be synced, and uploaders cannot make
+  links or hard links. The setup guide names the server options. As defence in
+  depth, the connector refuses an opened file whose owner, group or permissions
+  differ from what the listing and the stat before the open gave. On
+  OpenSSH and ProFTPD this catches some file swaps, but not a hard link, a
+  target with the same owner and permissions, or a folder replaced with a link
+  during the listing.
+- **An SFTP source skips a file whose size and modification time are
+  unchanged.** `new_only` and `update_only` read the pair as the file's
+  revision. An edit that keeps both, such as `put -p`, is missed: run `full` to
+  read it.
+- **The SFTP connector reads nothing of the worker's own SSH setup**: no
+  `~/.ssh` files, no agent and no Kerberos ticket. A worker that runs as a user
+  with no passwd entry, such as the shipped image started with another user id,
+  needs `LOGNAME`, or every SFTP sync fails with an `OSError`.
+- **An SSH login is a vault secret kind of its own.** `ssh_credentials` holds a
+  user name with a private key or a password, and the one host it may be used
+  with, so editing a source cannot send it to another server. An SFTP source
+  takes only this kind, and a source's `config` that holds `password`,
+  `private_key` or `passphrase` is refused.
+- **The vault opens an SSH login's key when the login is saved**, in a child
+  process that may take 5 seconds, at most two at a time for each API process.
+  A save that finds both busy is refused at once with a 503. An RSA key may have
+  at most 4096 bits, with its two primes of the same size, and a key held on a
+  security key is refused. An encrypted key may ask for at most 128 bcrypt
+  rounds (OpenSSH), or 1,000,000 iterations and a 64-byte key (PKCS#8). The
+  key may be at most 16,384 characters, and a passphrase or password 1,024.
+- **`SYNC_ALLOWED_HOSTS` lets an SFTP source reach a server on the company
+  network.** It is empty by default, and only SFTP sources read it. Set it for
+  the API and for the worker. A listed host may resolve to a private or CGNAT
+  address, never to a loopback, link-local or cloud metadata one. An entry that
+  is not one host, such as one with a port or a trailing dot, stops the settings
+  from loading. An entry matches the host that a source types, not its address.
+  The list is for the whole deployment: every organization can point a source at
+  a listed host. Git and website sources keep the plain address check.
+- **asyncssh joins the backend image**, under `EPL-2.0 OR GPL-2.0-or-later`,
+  taken under EPL-2.0. The licence inventory now reads a `License` field that is
+  a valid SPDX expression without a deprecated id, so `sniffio` is recorded as
+  `MIT OR Apache-2.0` and `tqdm` as `MPL-2.0 AND MIT`.
 
 ### Changed
 
+- A SharePoint source's **File types** takes at most 100 types of at most 16
+  characters each when the source is saved, as an SFTP source's does. A source
+  stored with more keeps syncing, and is refused only when it is saved again.
 - For connector authors: `BaseSyncConnector.download_file()` is now
   `fetch_file()`, which returns the path and the revision of the bytes it
   fetched. `_fetch` returns that revision, or `None`. An object store's

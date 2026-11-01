@@ -1,5 +1,5 @@
 ---
-source_sha: "90d9185a9978"
+source_sha: "d8b0ea3eec72"
 ---
 
 # Secretos y el vault { #secrets-and-the-vault }
@@ -99,6 +99,7 @@ secreto tiene un **kind**, y el kind decide qué campos existen.
 | `gcp_service_account` | El JSON de la cuenta de servicio, validado al entrar |
 | `github_oauth_app` | El client id público de una GitHub OAuth App y su secreto |
 | `git_token` | Un access token para git sobre HTTPS, y el único host al que puede enviarse |
+| `ssh_credentials` | Un nombre de usuario con una clave privada o una contraseña, para un servidor SFTP, y el único host con el que puede usarse |
 | `entra_app` | El tenant id, el client id y el client secret de un registro de aplicación de Microsoft Entra |
 | `openai_codex` | Un inicio de sesión de ChatGPT: un access token, un refresh token y el id de cuenta |
 | `none` | No es un secreto — la marca para un endpoint que no necesita credencial |
@@ -130,6 +131,51 @@ una clave de API de OpenAI para las funciones de voz. El selector nunca cambia a
 una URL que elige quien edita la fuente. Atado al host con el que se añadió, el
 token no puede dirigirse a otro servidor editando la fuente, y ninguna otra clave
 puede ocupar su lugar.
+
+`ssh_credentials` es el login SSH con el que una fuente de sincronización SFTP lee
+una carpeta. Lleva su host por el mismo motivo: quien edita la fuente escribe la
+dirección del servidor, y el conector solo envía el login al host y al puerto
+con los que se añadió. Un login añadido sin puerto solo se usa en el puerto 22. El
+host se guarda tal como lo escribe una fuente - en minúsculas, codificado en IDNA,
+una dirección IPv6 comprimida, sin punto final -, así que un mismo host no puede
+dejar de coincidir por haberse escrito de otra forma. A diferencia del host de un
+`git_token`, puede contener un guion bajo, como `sftp_server`.
+
+Un login guarda una clave privada, con su passphrase si la clave está cifrada, o
+una contraseña, nunca ambas. La clave se comprueba al entrar, en dos pasos:
+
+- **Lo que no cuesta nada** se ejecuta cada vez que se parsea un login, también
+  cada vez que el vault abre uno. La clave puede tener como mucho 16.384
+  caracteres, y una passphrase o una contraseña como mucho 1.024, así que no se
+  descodifica nada más largo. Lo pegado tiene que ser un bloque de clave
+  privada que lea la biblioteca SSH, una clave cifrada necesita su passphrase, y el
+  factor de trabajo propio de la clave puede ser como mucho de 128 rondas de bcrypt
+  (OpenSSH), o 1.000.000 de iteraciones y una clave derivada de 64 bytes (PKCS#8).
+  El factor de trabajo se lee de la cabecera de la clave, sin descifrarla.
+- **Abrir la clave** con su passphrase solo se ejecuta cuando se guarda un login,
+  después de comprobar que quien llama puede escribirlo. Se ejecuta en un proceso
+  hijo de vida corta que no importa nada de la aplicación y recibe la clave por su
+  entrada estándar. El proceso hijo puede tardar 5 segundos, y después se mata.
+  Como mucho se ejecutan dos a la vez en cada proceso de la API, y un guardado que
+  encuentra los dos ocupados se rechaza en el acto, con el estado 503.
+
+El proceso hijo rechaza una clave RSA de más de 4096 bits, o una cuyos dos primos
+difieren en tamaño en más de 16 bits, sin comprobar sus números, porque esa
+comprobación crece deprisa con el tamaño de cada primo. También rechaza una clave
+guardada en una llave de seguridad (`sk-`): el worker no tiene ninguna llave de
+hardware con la que firmar.
+
+El proceso hijo es necesario porque los números costosos de una clave cifrada están
+dentro de la parte que solo muestra el descifrado, y una clave RSA se comprueba con
+el lock del intérprete de Python tomado, así que un hilo no la mantiene fuera del
+event loop. Así que una clave que no se abre se rechaza mientras el formulario está
+abierto, no en la primera sincronización, y solo quien puede escribir el login
+puede hacer que el servidor abra una. El worker vuelve a abrir la clave una vez en
+cada sincronización, lo que no cuesta más de lo que permitió la comprobación.
+
+Su pista son los cuatro últimos caracteres del nombre de usuario, que no es
+secreto. Cuatro caracteres de una clave serían su armadura PEM. Consulta
+[Configurar SFTP](howto/configure-sync-sources.md#sftp-setup).
 
 `entra_app` es la identidad con la que inicia sesión una fuente de sincronización
 de SharePoint u OneDrive. Su alcance se fija en Microsoft Entra, no aquí: los

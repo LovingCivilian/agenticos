@@ -1096,9 +1096,9 @@ collection table, or let autovacuum remove the old row versions.
 The revision is the one place where the two flows can give different answers. The
 local sync finds an unchanged file by its hash only, and that check is exact. An
 exact revision, such as an S3 `ETag` or a Git blob sha, gives the same answer as
-the hash. A revision that can miss a change, such as a size and a modification
-time, can make `new_only` and `update_only` skip a rare edit. `full` is the
-remedy: it downloads and ingests every file again. A connector whose revision can
+the hash. A revision that can miss a change, such as the size and modification
+time an SFTP server reports for a file, can make `new_only` and `update_only` skip
+a rare edit. `full` is the remedy: it downloads and ingests every file again. A connector whose revision can
 miss a change says so in its docstring.
 
 The sync compares the listed revision with the one stored at the address,
@@ -1194,8 +1194,9 @@ been shared. The fallback is gone; the setting now serves only the
     choosing what is read under the operator's identity.
 
 What the source names in `secret_id` is a `gcp_service_account` for Drive, an
-`aws_credentials` pair for S3 or a `git_token` for a Git repository, declared by
-the connector as `SECRET_KIND` and offered to the wizard as `secret_kind` on the
+`aws_credentials` pair for S3, a `git_token` for a Git repository, an `entra_app`
+for SharePoint or an `ssh_credentials` login for an SFTP server, declared by the
+connector as `SECRET_KIND` and offered to the wizard as `secret_kind` on the
 connector listing.
 
 It used to be in `config`, encrypted by `app/core/crypto.py` — one
@@ -1212,8 +1213,9 @@ mechanism" was untrue. That module is gone
   not used here because it handles `api_key` only, and a service account is a
   multi-field form whose honest place is the Vault.
 - **The service refuses a config carrying a credential.** Posting the old field
-  names is answered with "a credential does not go in a source's configuration",
-  rather than being dropped so the source stores and then cannot authenticate.
+  names, or an SSH login's `password`, `private_key` or `passphrase`, is answered
+  with "a credential does not go in a source's configuration", rather than being
+  dropped so the source stores and then cannot authenticate.
 
 Reading it happens where there is a session and a tenant: the worker unseals the
 secret for the source's own organization and hands it to the connector beside the
@@ -1395,7 +1397,9 @@ documentation ([#987](https://github.com/vstorm-co/agenticos/issues/987)), and
 then Azure Blob and GCS, whose condition is met: `S3Connector` is an
 `ObjectStoreConnector` subclass, so each of those is a client and a
 `CONNECTOR_TYPE` rather than a second copy of the listing loop
-([#988](https://github.com/vstorm-co/agenticos/issues/988)).
+([#988](https://github.com/vstorm-co/agenticos/issues/988)). A folder tree on an
+SFTP server is read by the `sftp` connector - see [SFTP
+setup](howto/configure-sync-sources.md#sftp-setup).
 
 Notion, Slack and email archives are decided **against** for now, each for a reason recorded
 there — the last two because a conversation retrieves badly and the channel

@@ -2,7 +2,7 @@
 title: "AgenticOS vs Sauna"
 seo_title: "AgenticOS vs Sauna: una alternativa autoalojada"
 description: "Sauna es un asistente de IA proactivo por persona, en su nube. AgenticOS: muchos agents gobernados, cualquier modelo y budgets por agent en tus servidores."
-source_sha: "e589e2dd5acb"
+source_sha: "f611068c9f7e"
 ---
 
 # AgenticOS vs Sauna { #agenticos-vs-sauna }
@@ -21,7 +21,7 @@ Mantenido por el equipo de AgenticOS. Fuentes revisadas el 21 de octubre de 2026
 | Dónde se ejecuta | La nube de Sauna; infraestructura en EE. UU. para clientes de EE. UU., y los datos pueden tratarse en EE. UU. | Tu infraestructura, con Docker Compose |
 | Código | Propietario | Apache-2.0 |
 | Modelos | El modelo Sauna Lite en el plan Lite; todos los modelos desde Basic; modelos propios desde Pro | 28 providers, incluidos Ollama y LiteLLM en tu propio hardware |
-| Conocimiento | Los archivos que subes, la memoria que aprende y las herramientas que conectas | Colecciones de documentos en tu Postgres, con el parsing y el chunking que elijas, y cinco conectores de sincronización |
+| Conocimiento | Los archivos que subes, la memoria que aprende y las herramientas que conectas | Colecciones de documentos en tu Postgres, con el parsing y el chunking que elijas, y seis conectores de sincronización |
 | Superficies | App web, app de iOS, iMessage, Slack, Gmail, Superhuman, correo electrónico | Chat web, widget, página alojada, API HTTP, WebSocket, Slack, Telegram, Mattermost |
 | Compartir | Privado por defecto; se comparte con personas elegidas, y un cerebro compartido de empresa en el plan Team | Seis roles, 33 permisos y grants por recurso, por organización |
 | Autonomía | Configurable, desde proponer acciones hasta actuar por su cuenta | Aprobaciones por capability, por herramienta y por conexión MCP, decididas por una persona con `approvals:decide` |
@@ -52,7 +52,7 @@ En Sauna decides cuánto puede hacer sin ti. En AgenticOS una herramienta que el
 
 ### Conocimiento que puedes inspeccionar { #knowledge-you-can-inspect }
 
-Sauna guarda los archivos que subes y los consulta cuando trabaja. AgenticOS añade colecciones de documentos gestionadas: eliges el [parser](../file-processing.md#parser-selection-rag) y el [chunking](../file-processing.md#chunking-configuration) por colección. Puedes sincronizar desde Google Drive, S3, SharePoint u OneDrive, un sitio web o un repositorio git.
+Sauna guarda los archivos que subes y los consulta cuando trabaja. AgenticOS añade colecciones de documentos gestionadas: eliges el [parser](../file-processing.md#parser-selection-rag) y el [chunking](../file-processing.md#chunking-configuration) por colección. Puedes sincronizar desde Google Drive, S3, SharePoint u OneDrive, un sitio web, un repositorio git o una carpeta de un servidor SFTP.
 
 ## Cuándo basta con Sauna { #when-sauna-is-enough }
 

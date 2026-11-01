@@ -44,7 +44,7 @@ Claude Code runs Claude models. AgenticOS lets each agent use the model that fit
 
 ### Company knowledge, not only the repository
 
-Claude Code's context comes from the repository, CLAUDE.md files, skills and MCP servers. AgenticOS adds managed [document collections](../file-processing.md#rag-document-ingestion) with sync from Drive, S3, SharePoint, websites and git, [skills](../skills.md) and [context files](../context.md) shared across agents.
+Claude Code's context comes from the repository, CLAUDE.md files, skills and MCP servers. AgenticOS adds managed [document collections](../file-processing.md#rag-document-ingestion) with sync from Drive, S3, SharePoint, websites, git and SFTP servers, [skills](../skills.md) and [context files](../context.md) shared across agents.
 
 ## When Claude Code is the right tool
 
