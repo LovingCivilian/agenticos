@@ -6,15 +6,18 @@ constraint: **a secret is referenced, never handed around.** Most of what is
 worth testing here is that constraint holding.
 """
 
+import functools
 import json
 import traceback
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncssh
 import pytest
 from pydantic import ValidationError
 
+from app.core import secret_kinds
 from app.core.exceptions import AlreadyExistsError, BadRequestError, NotFoundError
 from app.core.permissions import AuthContext, OrgRoleName
 from app.core.secret_kinds import (
@@ -283,6 +286,419 @@ class TestSealAndOpen:
             )
         )
         assert "SUPERSECRET" not in rendered
+
+
+PASSPHRASE = "Tr0ub4dor&3-zebra-quokka"
+WRONG_PASSPHRASE = "Wr0ng-otter-9-velvet"
+PASSWORD = "hunter2-but-longer-7"
+
+
+@functools.cache
+def _ssh_key(algorithm: str) -> asyncssh.SSHKey:
+    """One key per algorithm for the session, made in memory. No key file is committed."""
+    if algorithm == "ssh-rsa":
+        return asyncssh.generate_private_key("ssh-rsa", key_size=2048)
+    return asyncssh.generate_private_key(algorithm)
+
+
+@functools.cache
+def _key_text(form: str, sealed_with: str = PASSPHRASE) -> str:
+    """A private key as a person pastes it, in one of the formats asyncssh reads.
+
+    PKCS#1 is RSA only, so that form uses an RSA key. An encrypted form is
+    sealed with `sealed_with`. An encrypted OpenSSH key uses the bcrypt KDF. 16
+    rounds is what `ssh-keygen` uses, and it keeps a test fast.
+    """
+    passphrase = sealed_with if form.endswith("-encrypted") else None
+    match form.removesuffix("-encrypted"):
+        case "openssh":
+            data = _ssh_key("ssh-ed25519").export_private_key(
+                "openssh", passphrase, rounds=16, ignore_few_rounds=True
+            )
+        case "pkcs8":
+            data = _ssh_key("ssh-ed25519").export_private_key("pkcs8-pem", passphrase)
+        case _:
+            data = _ssh_key("ssh-rsa").export_private_key("pkcs1-pem", passphrase)
+    return data.decode()
+
+
+def _ssh_login(**fields: object):
+    """An SSH login for sftp.example.com, with the fields a test gives."""
+    values = {"username": "partner-sync", "host": "sftp.example.com", **fields}
+    return secret_kinds.SshCredentialsSecret(**values)
+
+
+def _echoes(shown: str, secret: str, width: int = 12) -> bool:
+    """Whether `shown` holds any run of `width` characters of `secret`.
+
+    A part is enough: a truncated repr shows the start and the end of a value.
+    A key's PEM armour lines are not secret, so only its body counts.
+    """
+    body = "".join(line for line in secret.splitlines() if not line.startswith("-----"))
+    return any(body[i : i + width] in shown for i in range(len(body) - width + 1))
+
+
+def _what_a_refusal_shows(refused: pytest.ExceptionInfo[ValidationError]) -> str:
+    """Every place a refusal's text can go: the form, a log line and a traceback."""
+    exc = refused.value
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    messages = [error["msg"] for error in exc.errors()]
+    return "\n".join([str(exc), repr(exc), rendered, *messages])
+
+
+def _one_character_changed(text: str, line: int) -> str:
+    """The paste with one character changed in the middle of one of its lines."""
+    lines = text.splitlines(keepends=True)
+    content = lines[line].rstrip("\n")
+    middle = len(content) // 2
+    replacement = "B" if content[middle] == "A" else "A"
+    lines[line] = content[:middle] + replacement + content[middle + 1 :] + "\n"
+    return "".join(lines)
+
+
+def _first_body_line_lost(text: str) -> str:
+    """The paste without the first line after its BEGIN line."""
+    lines = text.splitlines(keepends=True)
+    return "".join([lines[0], *lines[2:]])
+
+
+def _chained_from_none(refused: pytest.ExceptionInfo[ValidationError]) -> bool:
+    """Whether the refusal's own `ValueError` drops the asyncssh exception it replaced."""
+    error = refused.value.errors()[0]["ctx"]["error"]
+    return error.__cause__ is None and error.__suppress_context__ is True
+
+
+class TestSshCredentials:
+    """The SSH login an SFTP source logs in with, and the one host it may be used with."""
+
+    def test_an_ssh_login_takes_a_key_or_a_password_and_never_both_or_neither(self):
+        """A login uses one method. With both, the connector would have to guess
+        which one to offer. With neither, it has nothing to log in with."""
+        assert _ssh_login(private_key=_key_text("openssh")).password is None
+        assert _ssh_login(password=PASSWORD).private_key is None
+        with pytest.raises(ValidationError, match="a private key or a password"):
+            _ssh_login(private_key=_key_text("openssh"), password=PASSWORD)
+        with pytest.raises(ValidationError, match="a private key or a password"):
+            _ssh_login()
+
+    def test_a_passphrase_without_a_key_is_refused(self):
+        """A passphrase opens a key. Beside a password, it is a second secret that
+        nothing reads."""
+        with pytest.raises(ValidationError, match="passphrase goes with a private key"):
+            _ssh_login(password=PASSWORD, passphrase=PASSPHRASE)
+
+    @pytest.mark.parametrize(
+        ("form", "passphrase"),
+        [
+            ("openssh", None),
+            ("pkcs8", None),
+            ("pkcs1", None),
+            ("openssh-encrypted", PASSPHRASE),
+            ("pkcs8-encrypted", PASSPHRASE),
+            ("pkcs1-encrypted", PASSPHRASE),
+            # asyncssh ignores a passphrase for a key that is not encrypted, in
+            # all three formats. The login accepts what asyncssh accepts.
+            ("openssh", PASSPHRASE),
+            ("pkcs8", PASSPHRASE),
+            ("pkcs1", PASSPHRASE),
+        ],
+        ids=[
+            "openssh",
+            "pkcs8",
+            "pkcs1",
+            "openssh-encrypted",
+            "pkcs8-encrypted",
+            "pkcs1-encrypted",
+            "openssh-passphrase-ignored",
+            "pkcs8-passphrase-ignored",
+            "pkcs1-passphrase-ignored",
+        ],
+    )
+    def test_an_openssh_pkcs8_and_pkcs1_key_are_accepted_and_an_encrypted_one_needs_its_passphrase(
+        self, form: str, passphrase: str | None
+    ):
+        """The key is read when it is stored. A paste that cannot log in is
+        refused while the form is open, not at the first sync."""
+        key = _key_text(form)
+
+        login = _ssh_login(private_key=key, passphrase=passphrase)
+
+        assert login.private_key.get_secret_value() == key
+        if form.endswith("-encrypted"):
+            with pytest.raises(ValidationError, match="give its passphrase if it has one"):
+                _ssh_login(private_key=key)
+
+    @pytest.mark.parametrize(
+        "paste",
+        [
+            pytest.param(
+                lambda: _ssh_key("ssh-ed25519").export_public_key("openssh").decode(),
+                id="public-key",
+            ),
+            pytest.param(
+                lambda: _key_text("openssh")[: len(_key_text("openssh")) // 2],
+                id="truncated-openssh",
+            ),
+            pytest.param(
+                lambda: _key_text("pkcs1")[: len(_key_text("pkcs1")) // 2],
+                id="truncated-pkcs1",
+            ),
+        ],
+    )
+    def test_a_public_key_or_a_truncated_paste_is_refused_without_echoing_it(self, paste):
+        """The sentence is ours. asyncssh's own text is not shown, and no part of
+        the paste reaches the form, a log line or a traceback.
+
+        Two paths would carry the paste. Pydantic's `input_value` repeats the
+        submitted fields in `str()` and `repr()` of the error, cut to their head
+        and tail, so the end of the paste shows. `hide_input_in_errors` closes
+        it. The asyncssh exception chained to our `ValueError` would carry its
+        own text. `from None` closes that.
+        """
+        text = paste()
+
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(private_key=text)
+
+        shown = _what_a_refusal_shows(refused)
+        assert "input_value" not in str(refused.value)
+        assert "The private key could not be read" in shown
+        assert "Paste the whole key file" in shown
+        assert not _echoes(shown, text)
+        assert "Invalid private key" not in shown
+        assert "Missing PEM footer" not in shown
+        assert _chained_from_none(refused)
+
+    @pytest.mark.parametrize("form", ["openssh-encrypted", "pkcs8-encrypted", "pkcs1-encrypted"])
+    def test_a_wrong_passphrase_is_refused_without_echoing_the_key(self, form: str):
+        """asyncssh answers a wrong passphrase with a different exception for each
+        format. Each one gets the same sentence, and neither the key nor the
+        passphrase that was typed is shown.
+
+        The passphrase is the last field, so pydantic's `input_value` would show
+        it whole in `str()` and `repr()` of the error. `hide_input_in_errors`
+        closes that path, and `from None` drops the chained asyncssh exception.
+        """
+        key = _key_text(form)
+
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(private_key=key, passphrase=WRONG_PASSPHRASE)
+
+        shown = _what_a_refusal_shows(refused)
+        assert "input_value" not in str(refused.value)
+        assert "The private key could not be read with this passphrase" in shown
+        assert not _echoes(shown, key)
+        assert not _echoes(shown, WRONG_PASSPHRASE, 8)
+        assert "Incorrect passphrase" not in shown
+        assert "Unable to decrypt" not in shown
+        assert _chained_from_none(refused)
+
+    @pytest.mark.parametrize(
+        ("paste", "passphrase", "sentence", "foreign"),
+        [
+            pytest.param(
+                # Line 10 of a 2048-bit PKCS#1 key is inside the private exponent,
+                # so the key still parses and then fails cryptography's check.
+                lambda: _one_character_changed(_key_text("pkcs1"), line=10),
+                None,
+                "Paste the whole key file",
+                ["Invalid private key", "modulus"],
+                id="one-character-changed-pkcs1",
+            ),
+            pytest.param(
+                lambda: _first_body_line_lost(_key_text("pkcs8-encrypted")),
+                PASSPHRASE,
+                "could not be read with this passphrase",
+                ["codec", "utf-8", "decode", "invalid start byte"],
+                id="encrypted-pkcs8-first-line-lost",
+            ),
+        ],
+    )
+    def test_a_damaged_key_that_the_parser_refuses_in_its_own_words_gets_our_sentence(
+        self, paste, passphrase: str | None, sentence: str, foreign: list[str]
+    ):
+        """asyncssh does not wrap every parse failure. A changed character in a
+        PKCS#1 key reaches cryptography's `ValueError`, and an encrypted PKCS#8
+        key without its first line a `UnicodeDecodeError`. Both are `ValueError`,
+        as asyncssh's own two classes are. The refusal is still our sentence,
+        and their text is not shown."""
+        text = paste()
+        with pytest.raises(ValueError) as parsed:
+            asyncssh.import_private_key(text, passphrase)
+        # The case is here for the error asyncssh does not wrap. If asyncssh
+        # starts to wrap it, this case tests nothing new: choose another paste.
+        assert not isinstance(parsed.value, asyncssh.KeyImportError | asyncssh.KeyEncryptionError)
+
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(private_key=text, passphrase=passphrase)
+
+        shown = _what_a_refusal_shows(refused)
+        assert "input_value" not in str(refused.value)
+        assert sentence in shown
+        assert not [words for words in foreign if words in shown]
+        assert not _echoes(shown, text)
+        assert _chained_from_none(refused)
+
+    def test_a_short_passphrase_opens_an_encrypted_key(self):
+        """`ssh-keygen` accepts a passphrase of five characters. The passphrase is
+        not a credential the hint reads, so it has no 8-character floor, and a
+        real key sealed with a short one is accepted."""
+        key = _key_text("openssh-encrypted", sealed_with="abcde")
+
+        login = _ssh_login(private_key=key, passphrase="abcde")
+
+        assert login.passphrase.get_secret_value() == "abcde"
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param({"password": "short7!"}, id="password"),
+            pytest.param({"private_key": "1234567"}, id="private-key"),
+        ],
+    )
+    def test_a_password_or_key_too_short_to_hint_safely_is_refused(self, fields):
+        """Every field that authenticates is at least 8 characters, as for every
+        kind. A shorter one is a truncated paste, or short enough that four
+        characters of it give most of it away."""
+        with pytest.raises(ValidationError, match=f"at least {MIN_CREDENTIAL_LENGTH} characters"):
+            _ssh_login(**fields)
+
+    @pytest.mark.parametrize(
+        "username",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("sync user", id="space"),
+            pytest.param("sync\tuser", id="tab"),
+            pytest.param("sync\nX-Forged: 1", id="newline"),
+            pytest.param("sync\n", id="trailing-newline"),
+            pytest.param("sync\x00", id="nul"),
+            pytest.param("sync\x1b[31m", id="escape"),
+            pytest.param("sync\x7f", id="delete"),
+            pytest.param("a" * 256, id="too-long"),
+        ],
+    )
+    def test_a_user_name_with_whitespace_or_a_control_character_is_refused(self, username: str):
+        """The user name goes into the login refusal, the sync log and log lines. A
+        line break or a control character there could forge a line. SSH user
+        names hold neither, and are at most 255 characters here."""
+        with pytest.raises(ValidationError):
+            _ssh_login(username=username, password=PASSWORD)
+
+    def test_a_user_name_of_255_characters_or_with_at_is_accepted(self):
+        """The limits refuse only what the rule names. A user name may hold `@`,
+        as a cloud SFTP service's `account@domain` does."""
+        assert _ssh_login(username="a" * 255, password=PASSWORD).username == "a" * 255
+        assert _ssh_login(username="sync@corp.example", password=PASSWORD).hint == "mple"
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("sftp://sftp.example.com", id="scheme"),
+            pytest.param("sftp.example.com/drop", id="path"),
+            pytest.param("sync@sftp.example.com", id="user"),
+            pytest.param("sftp example.com", id="space"),
+            pytest.param("sftp.example.com\n", id="newline"),
+            pytest.param("2001:db8::7", id="ipv6-without-brackets"),
+        ],
+    )
+    def test_an_ssh_login_s_host_is_one_host_and_an_optional_port(self, host: str):
+        """The host binds the login. A URL, a path or a user in it could never
+        match the host a source dials, so the login would be refused at every
+        sync. An IPv6 address needs its brackets, or its last group reads as a
+        port."""
+        with pytest.raises(ValidationError):
+            _ssh_login(host=host, password=PASSWORD)
+
+    def test_an_ssh_login_is_hinted_by_its_user_name(self):
+        """The user name says which login it is, and it is not secret, as an AWS
+        access key id is not. Four characters of a key would be its PEM armour."""
+        by_key = _ssh_login(username="partner-sync", private_key=_key_text("openssh"))
+        by_password = _ssh_login(username="partner-sync", password=PASSWORD)
+
+        assert by_key.hint == "sync"
+        assert by_password.hint == "sync"
+        sealed = seal_secret(by_password, scope=VaultScope.organization(uuid.uuid4()))
+        assert sealed.hint == "sync"
+
+    def test_an_ssh_login_masks_its_key_and_password_in_a_repr(self):
+        """A model in a log line is how a plaintext usually escapes. The key, its
+        passphrase and the password are masked. The user name is not secret."""
+        key = _key_text("openssh-encrypted")
+        by_key = _ssh_login(private_key=key, passphrase=PASSPHRASE)
+        by_password = _ssh_login(password=PASSWORD)
+
+        for login, hidden in ((by_key, [key, PASSPHRASE]), (by_password, [PASSWORD])):
+            for surface in (repr(login), str(login), str(login.model_dump())):
+                assert not [value for value in hidden if _echoes(surface, value, 8)]
+        assert "partner-sync" in repr(by_password)
+
+    def test_an_ssh_login_survives_the_envelope_whole(self):
+        """The vault seals the login as JSON, and the key check runs again when it
+        opens. So the key keeps its line breaks and the passphrase its value, or
+        the stored login stops opening."""
+        scope = VaultScope.organization(uuid.uuid4())
+        key = _key_text("openssh-encrypted")
+        value = _ssh_login(private_key=key, passphrase=PASSPHRASE)
+
+        opened = unseal_secret(
+            seal_secret(value, scope=scope).ciphertext,
+            kind=secret_kinds.SecretKind.SSH_CREDENTIALS,
+            scope=scope,
+        )
+
+        assert opened == value
+        assert opened.private_key.get_secret_value() == key
+        assert opened.passphrase.get_secret_value() == PASSPHRASE
+
+    @pytest.mark.parametrize(
+        ("host", "hostname", "port", "allowed"),
+        [
+            ("sftp.example.com", "sftp.example.com", 22, True),
+            ("SFTP.Example.com", "sftp.example.com", 22, True),
+            ("sftp.example.com:22", "sftp.example.com", 22, True),
+            ("sftp.example.com", "sftp.example.com", 2222, False),
+            ("sftp.example.com:2222", "sftp.example.com", 2222, True),
+            ("sftp.example.com:2222", "sftp.example.com", 22, False),
+            # 443 is the Git default, not the SSH one.
+            ("sftp.example.com", "sftp.example.com", 443, False),
+            ("sftp.example.com", "sftp.example.com.evil.test", 22, False),
+            ("sftp.example.com", "files.example.com", 22, False),
+            ("[2001:db8::7]", "2001:db8::7", 22, True),
+            ("[2001:db8::7]:2222", "2001:db8::7", 2222, True),
+            ("[2001:db8::7]", "2001:db8::8", 22, False),
+            ("xn--bcher-kva.example", "xn--bcher-kva.example", 22, True),
+        ],
+    )
+    def test_an_ssh_login_allows_only_its_host_and_port_with_22_by_default(
+        self, host: str, hostname: str, port: int, allowed: bool
+    ):
+        """A member who can edit a source could point it at a server of their own
+        and receive the password. The host is sealed with the login, so the
+        connector sends the login to that host and port only (#987)."""
+        login = _ssh_login(host=host, password=PASSWORD)
+
+        assert login.allows(hostname, port) is allowed
+
+    def test_the_ssh_login_form_draws_the_key_as_a_masked_textarea(self):
+        """A key has line breaks, and a password input removes them. So the key is
+        a textarea, and masked like every field that authenticates."""
+        info = next(
+            info
+            for info in describe_kinds()
+            if info.kind == secret_kinds.SecretKind.SSH_CREDENTIALS
+        )
+        properties = info.json_schema["properties"]
+
+        def masked(name: str) -> bool:
+            branches = [properties[name], *properties[name].get("anyOf", [])]
+            return any(branch.get("format") == "password" for branch in branches)
+
+        assert properties["private_key"].get("x-textarea") is True
+        assert masked("private_key")
+        assert masked("passphrase")
+        assert masked("password")
+        assert "x-textarea" not in properties["password"]
 
 
 class TestStoringASecret:

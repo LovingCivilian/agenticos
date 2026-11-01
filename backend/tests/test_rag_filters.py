@@ -30,9 +30,13 @@ pytestmark = [pytest.mark.anyio, pytest.mark.security]
 
 
 class TestVocabularies:
-    def test_source_is_the_four_code_set_origins(self):
-        assert sorted(SOURCE_VOCABULARY) == ["gdrive", "local", "s3", "upload"]
+    def test_source_is_the_five_code_set_origins(self):
+        """The ingest stamps a synced document with its connector type, so an SFTP
+        document is `sftp`. Without the value, the knowledge tool cannot filter on
+        it."""
+        assert sorted(SOURCE_VOCABULARY) == ["gdrive", "local", "s3", "sftp", "upload"]
         assert Source.UPLOAD == "upload"
+        assert Source.SFTP == "sftp"
 
     def test_document_type_vocabulary_is_extensions_without_dots(self):
         assert "pdf" in DOCUMENT_TYPE_VOCABULARY

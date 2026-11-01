@@ -450,6 +450,30 @@ class TestTheReportItself:
 
         assert rows["MCP_ALLOWED_HOSTS"] == shown
 
+    @pytest.mark.parametrize(
+        ("hosts", "shown"),
+        [
+            (["files-01"], "files-01"),
+            (["files-01", "10.0.0.5"], "files-01, 10.0.0.5"),
+            ([], "none"),
+        ],
+    )
+    def test_the_sync_allowlist_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, hosts: list[str], shown: str
+    ) -> None:
+        """Each listed host is a server inside this deployment's network that every
+        organization's SFTP source may reach. So a reviewer finds it beside the
+        other allowlists, right after the MCP one. The MCP list is set to
+        something else, so the row cannot read the wrong setting."""
+        monkeypatch.setattr(settings, "MCP_ALLOWED_HOSTS", ["postgres-mcp"])
+        monkeypatch.setattr(settings, "SYNC_ALLOWED_HOSTS", hosts)
+
+        names = [row[0] for row in _settings_section().rows]
+        rows = {row[0]: row[1] for row in _settings_section().rows}
+
+        assert rows["SYNC_ALLOWED_HOSTS"] == shown
+        assert names.index("SYNC_ALLOWED_HOSTS") == names.index("MCP_ALLOWED_HOSTS") + 1
+
     def test_the_settings_say_which_mail_path_is_live(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

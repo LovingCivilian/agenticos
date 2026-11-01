@@ -122,6 +122,7 @@ class TestListing:
             "github_app",
             "google_oauth_app",
             "git_token",
+            "ssh_credentials",
             "entra_app",
             "openai_codex",
         }

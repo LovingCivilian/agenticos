@@ -19,14 +19,19 @@ say:
   that cannot authenticate and say nothing about why.
 """
 
+import socket
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from app.core import secret_purposes
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.permissions import AuthContext, OrgRoleName
+from app.core.secret_kinds import SecretKind
 from app.repositories import organization_secret_repo
 from app.schemas.sync_source import (
     SyncSourceClone,
@@ -34,6 +39,8 @@ from app.schemas.sync_source import (
     SyncSourceUpdate,
 )
 from app.services import sync_source as sync_source_module
+from app.services.organization_secret import OrganizationSecretService
+from app.services.rag.connectors import CONNECTOR_REGISTRY
 from app.services.rag.connectors.s3 import S3Connector
 from app.services.sync_source import SyncSourceService
 
@@ -105,6 +112,37 @@ def _service(
 
 def _vault_row(*, kind: str, hint: str = "a1b2") -> SimpleNamespace:
     return SimpleNamespace(id=uuid.uuid4(), kind=kind, hint=hint)
+
+
+def _resolve_publicly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer every name with a public address, below the real SSRF guard.
+
+    The SFTP connector resolves its host when it checks a config. A test that
+    needs the config accepted must not depend on DNS or on the network.
+    """
+
+    def getaddrinfo(_host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))
+        ]
+
+    monkeypatch.setattr("app.core.sanitize.socket.getaddrinfo", getaddrinfo)
+
+
+def _valid_config(connector_type: str) -> dict[str, object]:
+    """A config the connector accepts, so a refusal is about the field a test adds.
+
+    The SFTP config is accepted only when its host resolves: see
+    :func:`_resolve_publicly`.
+    """
+    if connector_type == "sftp":
+        public = Ed25519PrivateKey.generate().public_key()
+        return {
+            "host": "sftp.example.com",
+            "root_path": "/drop",
+            "host_key": public.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode(),
+        }
+    return {"bucket": "docs"}
 
 
 def _drive(**overrides) -> SyncSourceCreate:
@@ -246,6 +284,38 @@ class TestACredentialInTheConfigIsRefused:
         assert field in exc.value.details["fields"]
         assert "does not go in a source's configuration" in exc.value.message
 
+    @pytest.mark.security
+    @pytest.mark.parametrize("field", ["password", "private_key", "passphrase"])
+    @pytest.mark.parametrize("connector_type", ["sftp", "s3"])
+    async def test_a_password_private_key_or_passphrase_in_the_config_is_refused(
+        self, monkeypatch, connector_type: str, field: str
+    ):
+        """SFTP is the first connector whose users hold a password. Posted in the
+        config, it would sit in plaintext in a JSONB column, and the source would
+        still not log in. No connector has a field of these names, so every
+        connector refuses them. The refusal names the field and never the value.
+
+        The config without the field is one the connector accepts offline, so the
+        refusal is about the field, whatever order the service checks in."""
+        from app.services.rag.connectors import CONNECTOR_REGISTRY
+
+        _resolve_publicly(monkeypatch)
+        service = _service(monkeypatch)
+        accepted = _valid_config(connector_type)
+        assert await CONNECTOR_REGISTRY[connector_type]().validate_config(accepted) is None
+        config = {**accepted, field: "plaintext-credential-1234"}
+
+        with pytest.raises(BadRequestError) as exc:
+            await service.create_source(
+                SyncSourceCreate(name="Partner drop", connector_type=connector_type, config=config),
+                ctx=_ctx(_ORG),
+            )
+
+        assert exc.value.details["fields"] == [field]
+        assert "does not go in a source's configuration" in exc.value.message
+        assert "plaintext-credential-1234" not in f"{exc.value.message} {exc.value.details}"
+        sync_source_module.sync_source_repo.create.assert_not_awaited()
+
     async def test_a_config_of_only_real_fields_passes(self, monkeypatch):
         service = _service(monkeypatch)
 
@@ -342,7 +412,37 @@ class TestWhatTheConnectorsDeclare:
             "web": "none",
             "git": "git_token",
             "sharepoint": "entra_app",
+            "sftp": "ssh_credentials",
         }
+
+    @pytest.mark.parametrize(
+        "connector_type",
+        # SFTP is named as well, so the test cannot pass because SFTP is missing
+        # from the registry.
+        sorted(
+            {
+                name
+                for name, cls in CONNECTOR_REGISTRY.items()
+                if cls.SECRET_KIND is not SecretKind.NONE
+            }
+            | {"sftp"}
+        ),
+    )
+    def test_each_connector_s_credential_can_be_stored_under_its_own_purpose(
+        self, connector_type: str
+    ):
+        """A member stores a credential under a purpose, and the vault refuses a
+        kind that the purpose does not name. `custom` names `api_key` only. So a
+        connector whose kind has no `connector` purpose takes a credential that
+        nobody can store, and its sources can never sync. The purpose has the
+        connector's own id, as the vault and the catalog file it."""
+        kind = CONNECTOR_REGISTRY[connector_type].SECRET_KIND
+        purpose = secret_purposes.get(connector_type)
+
+        assert purpose is not None
+        assert purpose.category is secret_purposes.PurposeCategory.CONNECTOR
+        assert purpose.kind is kind
+        OrganizationSecretService._check_purpose(connector_type, kind)
 
     def test_no_connector_config_schema_carries_a_credential_field(self):
         """The `secret: true` marker is gone, and with it `_mask_config`,

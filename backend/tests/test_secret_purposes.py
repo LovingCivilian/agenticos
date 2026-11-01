@@ -23,6 +23,7 @@ from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.permissions import AuthContext, OrgRoleName, Perm
 from app.core.secret_kinds import ApiKeySecret, AwsCredentialsSecret, SecretKind
 from app.db.models.resource_grant import Visibility
+from app.schemas.secret import SecretCreate
 from app.services.organization_secret import OrganizationSecretService
 
 pytestmark = pytest.mark.security
@@ -163,6 +164,48 @@ class TestStoring:
             )
 
         assert create.call_args.kwargs["owner_user_id"] is None
+
+    @pytest.mark.anyio
+    async def test_an_ssh_login_is_stored_under_the_sftp_purpose(self):
+        """The vault form posts a `SecretCreate`. An SSH login must validate as its
+        value, and the purpose `sftp` must take that kind. `custom` names
+        `api_key` only, so without both no member can store an SSH login, and
+        no SFTP source can get a credential."""
+        body = SecretCreate.model_validate(
+            {
+                "name": "Partner drop",
+                "purpose": "sftp",
+                "value": {
+                    "kind": "ssh_credentials",
+                    "username": "partner-sync",
+                    "host": "sftp.example.com",
+                    "password": "hunter2-but-longer-7",
+                },
+            }
+        )
+        ctx = _ctx()
+        with (
+            patch(
+                f"{MODULE}.organization_secret_repo.get_by_name", new=AsyncMock(return_value=None)
+            ),
+            patch(
+                f"{MODULE}.organization_secret_repo.create",
+                new=AsyncMock(return_value=_secret(ctx)),
+            ) as create,
+            patch(f"{MODULE}.record_audit", new=AsyncMock()),
+            patch(f"{MODULE}.NotificationService", new=MagicMock(return_value=AsyncMock())),
+        ):
+            await OrganizationSecretService(MagicMock()).create(
+                ctx, name=body.name, value=body.value, purpose=body.purpose
+            )
+
+        stored = create.call_args.kwargs
+        assert (stored["kind"], stored["purpose"], stored["hint"]) == (
+            "ssh_credentials",
+            "sftp",
+            "sync",
+        )
+        assert "hunter2-but-longer-7" not in stored["sealed_secret"]
 
 
 class TestWhoCanReachOne:

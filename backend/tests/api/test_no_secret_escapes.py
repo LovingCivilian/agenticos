@@ -33,6 +33,8 @@ _SECRET_MODELS = frozenset(
         "AwsCredentialsSecret",
         "GcpServiceAccountSecret",
         "GithubOAuthAppSecret",
+        # An SSH login holds a private key, its passphrase or a password.
+        "SshCredentialsSecret",
         # `NoSecret` is deliberately absent. It said "this provider needs no
         # key", and the only thing that ever accepted it was the credential
         # store that the vault replaced - the vault has no such shape, because a
@@ -55,6 +57,9 @@ _SECRET_FIELDS = frozenset(
         "client_secret",
         "oauth_payload",
         "oauth_pending_payload",
+        # Opens an SSH private key. Listed by name too, so no entry of
+        # `_PATTERN_ALLOWED` can exempt it.
+        "passphrase",
         "password",
         "sealed_secret",
         "secret",
@@ -68,7 +73,7 @@ _SECRET_FIELDS = frozenset(
 # It is the half that found `InvitationRead.token`, which is not on the list
 # above and never would have been: nothing about the name `token` is unusual
 # until you notice the response hands out a bearer credential.
-_SECRET_WORDS = re.compile("secret|password|token|api_key|private_key")
+_SECRET_WORDS = re.compile("secret|password|passphrase|token|api_key|private_key")
 
 # Fields the pattern matches that are nonetheless safe. Every entry is a
 # promise about the value, and writing the promise down is the point - an

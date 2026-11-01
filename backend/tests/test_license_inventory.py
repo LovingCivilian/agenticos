@@ -43,6 +43,14 @@ BSD2_TEXT = (
     "permitted provided that the following conditions are met: 1. Redistributions of source code "
     "must retain the above copyright notice. 2. Redistributions in binary form must reproduce it."
 )
+APACHE_TEXT = "Apache License\nVersion 2.0, January 2004\nTERMS AND CONDITIONS"
+MPL_TEXT = "Mozilla Public License Version 2.0\n1. Definitions"
+# The EPL-2.0 text names the GPL as its Secondary License. asyncssh ships this text.
+EPL2_TEXT = (
+    'Eclipse Public License - v 2.0\n\n"Secondary License" means either the GNU General Public '
+    "License, Version 2.0, or any later versions of that license, including any exceptions or "
+    "additional permissions as identified by the initial Contributor."
+)
 
 
 class TestClassifyExpression:
@@ -144,6 +152,106 @@ class TestPythonLicense:
         assert inventory.python_license("", "", mit, []) == ("MIT", "classifier")
         assert inventory.python_license("", "", dual, [])[0] is None
         assert inventory.python_license("", "", dual, [MIT_TEXT]) == ("MIT", "licence file text")
+
+    @pytest.mark.parametrize(
+        ("license_field", "classifiers", "texts", "expected"),
+        [
+            pytest.param(
+                "EPL-2.0 OR GPL-2.0-or-later",
+                ["License :: OSI Approved"],
+                [EPL2_TEXT],
+                "EPL-2.0 OR GPL-2.0-or-later",
+                id="asyncssh",
+            ),
+            pytest.param(
+                "MIT OR Apache-2.0",
+                [
+                    "License :: OSI Approved :: MIT License",
+                    "License :: OSI Approved :: Apache Software License",
+                ],
+                [APACHE_TEXT],
+                "MIT OR Apache-2.0",
+                id="sniffio",
+            ),
+            pytest.param("MPL-2.0 AND MIT", [], [MPL_TEXT], "MPL-2.0 AND MIT", id="tqdm"),
+            pytest.param(
+                "epl-2.0 or gpl-2.0-or-later",
+                [],
+                [],
+                "EPL-2.0 OR GPL-2.0-or-later",
+                id="canonical-spelling",
+            ),
+            # One classifier names one of the two licences. The field names both.
+            pytest.param(
+                "MIT OR Apache-2.0",
+                ["License :: OSI Approved :: MIT License"],
+                [],
+                "MIT OR Apache-2.0",
+                id="expression-over-one-classifier",
+            ),
+            # One SPDX id that is not an alias is an expression too.
+            pytest.param("zlib", [], [], "Zlib", id="single-spdx-id"),
+        ],
+    )
+    def test_a_license_field_that_is_an_spdx_expression_is_read_as_one(
+        self, license_field: str, classifiers: list[str], texts: list[str], expected: str
+    ) -> None:
+        """A wheel built from a `license = {text = ...}` table puts an SPDX expression
+        in `License`, not in `License-Expression`. Read as an expression, it keeps
+        every licence it names. Read from the licence file, it loses some: the
+        EPL-2.0 text names the GPL, so asyncssh read as GPL-2.0-or-later, sniffio as
+        Apache-2.0 alone and tqdm as MPL-2.0 alone. An override cannot correct a
+        licence that resolved."""
+        assert inventory.python_license("", license_field, classifiers, texts) == (
+            expected,
+            "License field",
+        )
+
+    def test_license_expression_still_wins_over_an_spdx_license_field(self) -> None:
+        """`License-Expression` is the newer field, and a build tool that writes it
+        may keep an older `License` beside it. The newer one is the declared
+        licence. Read the other way, `MIT AND BSD-3-Clause` would be recorded as
+        `MIT` alone, which understates it."""
+        assert inventory.python_license("MIT AND BSD-3-Clause", "MIT", [], []) == (
+            "MIT AND BSD-3-Clause",
+            "License-Expression",
+        )
+
+    @pytest.mark.parametrize(
+        ("license_field", "classifiers", "texts", "expected"),
+        [
+            pytest.param("MIT License", [], [], ("MIT", "License field"), id="alias"),
+            pytest.param("Apache 2.0", [], [], ("Apache-2.0", "License field"), id="alias-spaced"),
+            pytest.param(
+                "MIT License\n\nPermission is hereby granted, free of charge",
+                [],
+                [],
+                ("MIT", "License field"),
+                id="whole-text",
+            ),
+            pytest.param(
+                "BSD",
+                ["License :: OSI Approved :: BSD License"],
+                [BSD3_TEXT],
+                ("BSD-3-Clause", "licence file text"),
+                id="not-an-spdx-id",
+            ),
+            pytest.param(
+                "UNKNOWN", [], [], (None, "no readable licence metadata"), id="setuptools-unknown"
+            ),
+        ],
+    )
+    def test_a_free_text_license_field_still_falls_through(
+        self,
+        license_field: str,
+        classifiers: list[str],
+        texts: list[str],
+        expected: tuple[str | None, str],
+    ) -> None:
+        """Most `License` fields are free text: a name, the whole licence, or the
+        `UNKNOWN` old setuptools wrote. None of them is an SPDX expression, so the
+        aliases, the classifiers and the licence file read them as before."""
+        assert inventory.python_license("", license_field, classifiers, texts) == expected
 
     def test_an_override_yields_to_metadata_that_names_a_licence(self) -> None:
         policy = inventory.Policy({"python:lib": inventory.Override("ISC", "read upstream")}, {})
