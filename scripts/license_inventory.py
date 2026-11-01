@@ -61,6 +61,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Literal
 
+from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+from packaging.licenses._spdx import LICENSES as SPDX_LICENSES
 from packaging.requirements import Requirement
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -202,6 +204,14 @@ CLASSIFIER_LICENSES: dict[str, str] = {
     "License :: OSI Approved :: GNU General Public License v2 (GPLv2)": "GPL-2.0-only",
     "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)": "GPL-2.0-or-later",
 }
+
+# The ids SPDX has deprecated - `GPL-2.0+`, `LGPL-2.1` and their kind - which
+# `packaging` still accepts as valid. Its private SPDX table is the only place
+# that records which ones they are; a `packaging` release that moves it fails
+# this script's import, and so the check, rather than letting one through.
+DEPRECATED_SPDX_IDS = frozenset(
+    entry["id"] for entry in SPDX_LICENSES.values() if entry["deprecated"]
+)
 
 LICENSE_FILE_NAMES = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE)", re.IGNORECASE)
 
@@ -578,9 +588,21 @@ def people(*fields: object) -> str:
 def python_license(
     expression: str, license_field: str, classifiers: list[str], license_texts: list[str]
 ) -> tuple[str | None, str]:
-    """A distribution's licence from its own metadata, most authoritative source first."""
+    """A distribution's licence from its own metadata, most authoritative source first.
+
+    A `License` field that is a valid SPDX expression is read as one. A wheel built
+    from a `license = {text = ...}` table puts its expression there and not in
+    `License-Expression`, and the licence file would lose part of it: the EPL-2.0
+    text names the GPL as its Secondary License, so asyncssh read as
+    GPL-2.0-or-later alone. Most `License` fields are free text - a name, the whole
+    licence, setuptools' `UNKNOWN` - and those go on to the aliases, the
+    classifiers and the licence file as before.
+    """
     if expression:
         return expression, "License-Expression"
+    declared = spdx_expression(license_field)
+    if declared:
+        return declared, "License field"
     alias = LICENSE_FIELD_ALIASES.get(license_field.lower()) or LICENSE_FIELD_ALIASES.get(
         license_field.splitlines()[0].strip().lower() if license_field else ""
     )
@@ -594,6 +616,38 @@ def python_license(
         if recognised:
             return recognised, "licence file text"
     return None, "no readable licence metadata"
+
+
+def spdx_expression(text: str) -> str | None:
+    """`text` in SPDX's canonical spelling, or None when it is not a current expression.
+
+    `packaging` checks every identifier against the SPDX licence list, so a free-text
+    name such as `BSD` or `MIT License` is not one. An expression that holds a
+    spelling SPDX has replaced is None too: no policy set names those spellings,
+    and an override cannot correct a licence that resolved, so read as the answer
+    one would fail the check with nothing in `policy.toml` able to fix it.
+    """
+    try:
+        canonical = canonicalize_license_expression(text)
+    except InvalidLicenseExpression:
+        return None
+    if any(superseded(identifier) for identifier in spdx_identifiers(canonical)):
+        return None
+    return canonical
+
+
+def superseded(identifier: str) -> bool:
+    """Whether an id from a canonical expression is a spelling SPDX has replaced.
+
+    That is a deprecated id, alone or with SPDX's `+` ("or any later version"):
+    SPDX lists `GPL-2.0+` but not `AGPL-3.0+`, and `packaging` accepts a `+` on
+    any id. It is also a `+` on a `-only` or `-or-later` id, the spellings that
+    replaced the `+` for the GNU licences, which `packaging` accepts too.
+    """
+    base = identifier.removesuffix("+")
+    if {identifier, base} & DEPRECATED_SPDX_IDS:
+        return True
+    return base != identifier and base.endswith(("-only", "-or-later"))
 
 
 def apply_override(

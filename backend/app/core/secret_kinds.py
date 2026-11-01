@@ -37,6 +37,12 @@ The kinds are the shapes that actually exist, and no more:
     A Google OAuth client's `client_id` and `client_secret`, for connecting a
     mailbox a trigger reads. The same two fields as GitHub's and a separate kind
     on purpose: a kind names what a credential is *for*.
+`ssh_credentials`
+    An SSH login an SFTP sync source reads a folder with: a user name with a
+    private key or a password, and the one host it may be used with. The host
+    is sealed with the login, as a Git token's is, so a source's editor cannot
+    send it to a server of their own. The key is read on the way in, for the
+    same reason a service account is.
 `entra_app`
     A Microsoft Entra app registration - tenant, client id and client secret -
     that a SharePoint or OneDrive sync source reads a site with. Three fields,
@@ -56,9 +62,10 @@ schema.
 """
 
 import json
+import re
 from dataclasses import replace
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 from pydantic import (
     AfterValidator,
@@ -69,12 +76,20 @@ from pydantic import (
     SecretStr,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from app.core.exceptions import BadRequestError
+from app.core.sanitize import spelled_host
 from app.core.vault import SealedSecret, VaultScope, seal, unseal
+
+# The child process that opens a key imports nothing of the application, so the
+# catch set and the report live in its module. `KEY_PARSE_ERRORS` is named here
+# too, for the code that already imports it from this module.
+from app.services.ssh_key_check import KEY_PARSE_ERRORS, MAX_RSA_BITS, KeyReport
 
 
 class SecretKind(StrEnum):
@@ -89,6 +104,7 @@ class SecretKind(StrEnum):
     GITHUB_APP = "github_app"
     GOOGLE_OAUTH_APP = "google_oauth_app"
     GIT_TOKEN = "git_token"
+    SSH_CREDENTIALS = "ssh_credentials"
     ENTRA_APP = "entra_app"
     OPENAI_CODEX = "openai_codex"
 
@@ -272,6 +288,25 @@ class GcpServiceAccountSecret(_SecretBase):
         return email[-4:]
 
 
+# The host a credential is bound to, as a person types it: a name or an
+# IPv4 address, or an IPv6 address in brackets, then an optional port. Without
+# the brackets, an IPv6 address's last group would read as a port.
+_BOUND_HOST_PATTERN = r"^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$"
+
+
+def _bound_host_allows(bound: str, hostname: str, port: int | None, *, default_port: int) -> bool:
+    """Whether a credential bound to `bound` may be sent to this host and port.
+
+    `hostname` as `urlsplit` answers it: lower-cased, and an IPv6 literal
+    without its brackets - which the stored host keeps, as a URL writes it.
+    The protocol's own port may be written or left out on either side, so
+    `bound` matches with or without `:<default_port>`.
+    """
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    expected = host if port in (None, default_port) else f"{host}:{port}"
+    return bound.lower().removesuffix(f":{default_port}") == expected.lower()
+
+
 class GitTokenSecret(_SecretBase):
     """An access token for git over HTTPS, and the one host it may be sent to.
 
@@ -292,7 +327,7 @@ class GitTokenSecret(_SecretBase):
     host: str = Field(
         min_length=1,
         max_length=253,
-        pattern=r"^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$",
+        pattern=_BOUND_HOST_PATTERN,
         title="Host",
         description="Where the token may be sent, e.g. github.com or gitlab.example.com:8443",
     )
@@ -310,9 +345,456 @@ class GitTokenSecret(_SecretBase):
         spelling `host` can store: `GitConfig` encodes the URL's host before
         anything reads it.
         """
-        host = f"[{hostname}]" if ":" in hostname else hostname
-        expected = host if port in (None, 443) else f"{host}:{port}"
-        return self.host.lower().removesuffix(":443") == expected.lower()
+        return _bound_host_allows(self.host, hostname, port, default_port=443)
+
+
+MAX_KEY_ROUNDS = 128
+"""The most bcrypt rounds an encrypted OpenSSH private key may ask for.
+
+An encrypted key names its own key derivation cost, and that cost is paid in
+full before a wrong passphrase shows: about 5 ms a round, in a field that holds
+up to 2**32 - 1. `ssh-keygen` writes 16, and `-a 100` is common advice.
+"""
+
+MAX_KEY_ITERATIONS = 1_000_000
+"""The most iterations an encrypted PKCS#8 private key's key derivation may ask for.
+
+The same cost, named in the key's DER. OpenSSL and asyncssh write 2,048.
+"""
+
+MAX_PRIVATE_KEY_CHARACTERS = 16 * 1024
+"""The longest private key an SSH login may hold, as pasted.
+
+An RSA key of 4096 bits is about 3.3 KB in any form asyncssh reads, encrypted
+included. The limit holds before anything decodes the paste: the DER decoder
+the header check runs is quadratic in its input, and a crafted body of a few MB
+held the event loop for seconds, in a request no permission check had seen yet.
+"""
+
+MAX_PASSWORD_CHARACTERS = 1024
+"""The longest passphrase or password an SSH login may hold.
+
+Both go to the child process's stdin, and the passphrase into the key
+derivation, which reads it whole.
+"""
+
+# The refusal of an over-long field, by field: its limit and our sentence.
+_LENGTH_LIMITS = {
+    "private_key": (
+        MAX_PRIVATE_KEY_CHARACTERS,
+        "The private key is too long. Paste only the key file, at most "
+        f"{MAX_PRIVATE_KEY_CHARACTERS:,} characters.",
+    ),
+    "passphrase": (
+        MAX_PASSWORD_CHARACTERS,
+        f"The passphrase is too long: at most {MAX_PASSWORD_CHARACTERS:,} characters.",
+    ),
+    "password": (
+        MAX_PASSWORD_CHARACTERS,
+        f"The password is too long: at most {MAX_PASSWORD_CHARACTERS:,} characters.",
+    ),
+}
+
+MAX_PBKDF2_KEY_BYTES = 64
+"""The longest key an encrypted PKCS#8 private key's PBKDF2 may be asked to derive.
+
+PBKDF2 runs its whole iteration count once for each block of hash output, so a
+key length multiplies the iterations. No cipher asyncssh decrypts a key with
+takes more than 32 bytes.
+"""
+
+_UNREADABLE_KEY = (
+    "The private key could not be read. Paste the whole key file, and give its "
+    "passphrase if it has one."
+)
+_WRONG_PASSPHRASE = "The private key could not be read with this passphrase."
+_COSTLY_KEY = (
+    "The private key is encrypted with too many key derivation rounds. Encrypt it again "
+    "with fewer, e.g. with ssh-keygen -p -a 16 -f <key file>."
+)
+_SLOW_KEY = (
+    "The private key takes too long to open. Use an Ed25519 key, or an RSA key of at "
+    f"most {MAX_RSA_BITS} bits."
+)
+_LARGE_RSA_KEY = (
+    f"The private key is an RSA key of more than {MAX_RSA_BITS} bits. Use an Ed25519 key, "
+    f"or an RSA key of at most {MAX_RSA_BITS} bits."
+)
+_UNBALANCED_RSA_KEY = (
+    "The private key is an RSA key whose two primes are not of the same size. Use an "
+    "Ed25519 key, or an RSA key that ssh-keygen made."
+)
+_SECURITY_KEY = (
+    "The private key is held on a security key, which a sync cannot use to log in. Use "
+    "an Ed25519 key without a security key."
+)
+
+_OPENSSH_MAGIC = b"openssh-key-v1\0"
+# The private key blocks asyncssh reads, by their BEGIN line: OpenSSH, PKCS#8
+# encrypted and not, and the three PKCS#1 ones.
+_READABLE_BLOCKS = frozenset(
+    f"-----BEGIN {name}PRIVATE KEY-----".encode()
+    for name in ("OPENSSH ", "ENCRYPTED ", "", "RSA ", "EC ", "DSA ")
+)
+
+
+class _KeyHeader(NamedTuple):
+    encrypted: bool
+    too_costly: bool
+
+
+def _pbe_work(tree: object) -> tuple[int, int]:
+    """The largest integer, and the longest PBKDF2 key length, in a decoded DER tree.
+
+    A PBKDF2 parameter SEQUENCE is the salt, the iteration count, then an
+    optional key length. That is the only SEQUENCE in an encrypted key's
+    algorithm parameters that starts with an OCTET STRING and two INTEGERs, so
+    its third element is read as a key length wherever it sits. A loop, not
+    recursion: the tree may be as deep as the decoder allowed.
+    """
+    largest, key_length, pending = 0, 0, [tree]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, tuple):
+            pending.extend(node)
+            if (
+                len(node) >= 3
+                and isinstance(node[0], bytes)
+                and isinstance(node[1], int)
+                and isinstance(node[2], int)
+            ):
+                key_length = max(key_length, node[2])
+        elif isinstance(node, int):
+            largest = max(largest, node)
+    return largest, key_length
+
+
+def _first_private_key_line(data: bytes) -> bytes | None:
+    """The BEGIN line asyncssh's block finder picks: the first that names a private key.
+
+    asyncssh splits on line feeds only and strips each line's end, so this does
+    the same.
+    """
+    for part in data.split(b"\n"):
+        line = part.rstrip()
+        if line.startswith(b"-----BEGIN ") and line.endswith(b" PRIVATE KEY-----"):
+            return line
+    return None
+
+
+def _key_header(key: str) -> _KeyHeader:
+    """Whether a pasted private key is encrypted, and whether it asks too much work.
+
+    Read from the key's header, without decrypting anything, so it costs the
+    same whatever the key asks for. asyncssh's own block finder picks the block,
+    so this reads the block that `import_private_key` will decrypt. It refuses
+    the work factors a header shows, so most costly keys are refused before any
+    process starts. It cannot bound the rest: an RSA key's validation, and the
+    numbers inside the encrypted part, show only when the key is opened. That is
+    `app.services.ssh_key_check`'s child process and its time limit. In
+    particular:
+
+    - The block's BEGIN line must name one of the blocks asyncssh reads, before
+      its block finder runs. It builds a pattern out of that line without
+      escaping it, so another label could fail to compile, or backtrack for
+      hours on a crafted footer.
+    - An OpenSSH key's bcrypt rounds are its `kdfoptions` after the salt.
+    - An encrypted PKCS#8 key's iteration count is an integer in its algorithm
+      parameters. Each integer there is held to the ceiling, so no layout of
+      PBES1, PBES2 or PKCS#12 parameters can hide one. Its PBKDF2 key length,
+      which multiplies the iterations, is held to :data:`MAX_PBKDF2_KEY_BYTES`.
+    - A PKCS#8 block with a PEM encryption header is refused: asyncssh would
+      decrypt the body first and read the count out of what it decrypted.
+    - DER is refused: a paste is text. And no PKCS#8 encryption algorithm can be
+      named in DER made of ASCII characters, so asyncssh's DER branch could not
+      derive a key from one anyway.
+
+    asyncssh is imported here, not at module level: this module loads with every
+    API process, and asyncssh is needed only where an SSH login is checked or
+    used (#2225).
+
+    Raises:
+        ValueError: Or another of :data:`KEY_PARSE_ERRORS`, when the paste holds
+            no private key block that asyncssh would read.
+    """
+    from asyncssh.asn1 import der_decode
+    from asyncssh.packet import SSHPacket
+    from asyncssh.public_key import _match_next
+
+    data = key.encode("ascii")
+    if _first_private_key_line(data) not in _READABLE_BLOCKS:
+        raise ValueError("No private key block asyncssh reads")
+    form, block, _ = _match_next(data, b"PRIVATE KEY")
+    if form != "pem":
+        raise ValueError("No PEM private key block")
+    name, headers, body = block
+    if name == b"OPENSSH":
+        if not body.startswith(_OPENSSH_MAGIC):
+            raise ValueError("Not an OpenSSH private key")
+        packet = SSHPacket(body[len(_OPENSSH_MAGIC) :])
+        cipher, _, kdf_options = packet.get_string(), packet.get_string(), packet.get_string()
+        if cipher == b"none":
+            return _KeyHeader(encrypted=False, too_costly=False)
+        # bcrypt's options: a salt, then the rounds. asyncssh refuses any other
+        # key derivation, so this reads the rounds whichever one is named.
+        options = SSHPacket(kdf_options)
+        options.get_string()
+        return _KeyHeader(encrypted=True, too_costly=options.get_uint32() > MAX_KEY_ROUNDS)
+    if name == b"ENCRYPTED":
+        if headers.get(b"Proc-Type") == b"4,ENCRYPTED":
+            raise ValueError("PKCS#8 under a PEM encryption header")
+        iterations, key_length = _pbe_work(der_decode(body))
+        return _KeyHeader(
+            encrypted=True,
+            too_costly=iterations > MAX_KEY_ITERATIONS or key_length > MAX_PBKDF2_KEY_BYTES,
+        )
+    if name == b"":
+        return _KeyHeader(encrypted=False, too_costly=False)
+    # PKCS#1: its encryption derives the key with one round of MD5, whatever the
+    # block says, so it has no cost to bound.
+    return _KeyHeader(encrypted=headers.get(b"Proc-Type") == b"4,ENCRYPTED", too_costly=False)
+
+
+def _key_header_refusal(key: str, passphrase: str | None) -> tuple[str, str] | None:
+    """The cheap key checks: the framing, the passphrase, the ceiling.
+
+    Returns the field the refusal is about and our sentence, as
+    :meth:`SshCredentialsSecret.opening_refusal` does for the child's checks, so
+    one mistake reads the same whichever check finds it. A parser's own text
+    can quote what it failed on - a `UnicodeDecodeError` carries the bytes it
+    could not decode, which are key material - so it is dropped with its
+    exception.
+    """
+    try:
+        header = _key_header(key)
+    except KEY_PARSE_ERRORS:
+        if passphrase is None:
+            return "private_key", _UNREADABLE_KEY
+        return "passphrase", _WRONG_PASSPHRASE
+    if header.too_costly:
+        return "private_key", _COSTLY_KEY
+    if header.encrypted and passphrase is None:
+        return "private_key", _UNREADABLE_KEY
+    return None
+
+
+def _refused_on(field: str, sentence: str) -> ValidationError:
+    """Our sentence as a validation error located at `field`, with no input.
+
+    A model validator's own `ValueError` is located at the model, so the form
+    that sent it marks no input and shows the sentence in a toast, behind
+    pydantic's "Value error, " prefix. Located at the field, the form marks the
+    input, and the sentence reads as written. No value travels with it.
+    """
+    return ValidationError.from_exception_data(
+        "SshCredentialsSecret",
+        [
+            InitErrorDetails(
+                type=PydanticCustomError("refused", "{sentence}", {"sentence": sentence}),
+                loc=(field,),
+                input=None,
+            )
+        ],
+    )
+
+
+# The host an SSH login is bound to, and its port when one is written: a name or
+# an IPv4 address, or an IPv6 address in brackets.
+_HOST_AND_PORT = re.compile(r"(?P<host>\[[^\]]*\]|[^:\[\]]*)(?::(?P<port>[0-9]{1,5}))?")
+_NOT_A_BOUND_HOST = (
+    "The host is a host name or an IP address with an optional port, e.g. "
+    "sftp.example.com or [2001:db8::7]:2222. An IPv6 address goes in brackets."
+)
+
+
+class SshCredentialsSecret(_SecretBase):
+    """An SSH login for an SFTP server, and the one host it may be used with.
+
+    The host is bound for the reason a Git token's is (#987). The source's
+    editor types the server's address, so with a login that any host could be
+    sent, a member who could edit a source could point it at a server of their
+    own and receive the password. Here the host is sealed with the login, set
+    by whoever added it, and the connector refuses to log in anywhere else.
+
+    The hint is the end of the user name. The user name says which login this
+    is and is not secret, as an AWS access key id is not, and four characters
+    of a key would be its PEM armour.
+
+    `passphrase` is a `SealedStr`, not a `CredentialStr`: the hint does not
+    read it, and `ssh-keygen` accepts a passphrase of five characters. It only
+    opens the key, which is itself at least :data:`MIN_CREDENTIAL_LENGTH` long.
+
+    The key is checked in two halves. Parsing a login checks only what is cheap:
+    the field lengths first (:data:`MAX_PRIVATE_KEY_CHARACTERS` and
+    :data:`MAX_PASSWORD_CHARACTERS`), so nothing decodes an over-long paste, then
+    that the paste is a private key, that an encrypted one has a passphrase, and
+    that the work factors its header shows are within
+    :data:`MAX_KEY_ROUNDS`, :data:`MAX_KEY_ITERATIONS` and
+    :data:`MAX_PBKDF2_KEY_BYTES`. Pydantic parses a login in a request body
+    before the route has authorized anything, and each time the vault opens a
+    stored one. Opening the key is the other half: `OrganizationSecretService`
+    opens it in a child process with a time limit when it stores the login
+    (`app.services.ssh_key_check`), and :meth:`opening_refusal` reads the
+    child's report. So a paste that cannot log in is refused while the form is
+    open: one that does not open, one held on a security key, which the worker
+    cannot sign with. And a stored key is one that opened within the limit, as
+    an RSA key of at most :data:`MAX_RSA_BITS` bits with primes of one size, as
+    `ssh-keygen` makes them. That bounds what the connector pays to open it again
+    at each connection: well under a second.
+    """
+
+    # A validator's error carries the whole input in `str()` and `repr()`, cut to
+    # its head and tail. The passphrase is the last field, so it would be shown
+    # whole, and the end of the key with it. Pydantic reads this setting from the
+    # outermost model only, so it covers a login built directly, and
+    # `SecretCreate`, `SecretUpdate` and the vault's adapter set it as well.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    kind: Literal[SecretKind.SSH_CREDENTIALS] = SecretKind.SSH_CREDENTIALS
+    username: str = Field(
+        min_length=1,
+        max_length=255,
+        # The user name goes into refusals, the sync log and log lines, where a
+        # line break or a control character, C1 included, could forge a line or
+        # start a terminal escape.
+        pattern=r"^[^\s\x00-\x1f\x7f-\x9f]+$",
+        title="User name",
+        description="The account on the SFTP server",
+    )
+    host: str = Field(
+        min_length=1,
+        # A name of 253 characters once IDNA-encoded, and a port. The vault parses
+        # the stored, encoded host again each time it opens the login, so the
+        # limit holds the encoded form, which `_spelled_as_a_source_host` keeps
+        # to 253 characters before the port.
+        max_length=253 + len(":65535"),
+        title="Host",
+        description="Where this login may be used, e.g. sftp.example.com or sftp.example.com:2222",
+    )
+    private_key: CredentialStr | None = Field(
+        default=None,
+        max_length=MAX_PRIVATE_KEY_CHARACTERS,
+        title="Private key",
+        description="The whole key file, in OpenSSH, PKCS#8 or PKCS#1 form. Preferred to a password",
+        # A key has line breaks. The vault form is generated from this schema,
+        # and a `CredentialStr` alone renders as `<input type="password">`,
+        # where a browser strips them, so the key that reaches the vault cannot
+        # be read. The same reason as `GithubAppSecret.private_key`.
+        json_schema_extra={"x-textarea": True},
+    )
+    passphrase: SealedStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_PASSWORD_CHARACTERS,
+        title="Key passphrase",
+        description="Only for an encrypted private key",
+    )
+    password: CredentialStr | None = Field(
+        default=None,
+        max_length=MAX_PASSWORD_CHARACTERS,
+        title="Password",
+        description="Only for a server that takes no key",
+    )
+
+    @property
+    def hint(self) -> str:
+        return self.username[-4:]
+
+    def allows(self, hostname: str, port: int) -> bool:
+        """Whether an SFTP source at this host and port may log in with this login.
+
+        `hostname` as `SftpConfig` spells it: lower-cased, IDNA-encoded, and an
+        IPv6 literal without its brackets and compressed. The stored host is
+        spelled the same way on the way in. Port 22 is SSH's own, so a login
+        stored for `sftp.example.com` is allowed on port 22 only.
+        """
+        return _bound_host_allows(self.host, hostname, port, default_port=22)
+
+    def opening_refusal(self, report: KeyReport | None) -> tuple[str, str] | None:
+        """Why the key cannot be stored, by what the child that opened it reported.
+
+        `report` is `None` when the child ran out of time. Returns the field the
+        refusal is about - `passphrase` for a passphrase that does not open the
+        key, else `private_key` - and our sentence, or `None` when the key opened.
+        """
+        if report is None:
+            return "private_key", _SLOW_KEY
+        if report.rsa_too_large:
+            return "private_key", _LARGE_RSA_KEY
+        if report.rsa_unbalanced:
+            return "private_key", _UNBALANCED_RSA_KEY
+        if report.on_a_security_key:
+            return "private_key", _SECURITY_KEY
+        if report.opens:
+            return None
+        if self.passphrase is None:
+            return "private_key", _UNREADABLE_KEY
+        return "passphrase", _WRONG_PASSPHRASE
+
+    @field_validator("private_key", "passphrase", "password", mode="before")
+    @classmethod
+    def _short_enough_to_read(cls, value: object, info: ValidationInfo) -> object:
+        """Refuse an over-long key, passphrase or password before anything reads it.
+
+        Before the field's own validation, so the length of the raw value is all
+        that is looked at, and in our words on the field: pydantic's own message
+        for `max_length` counts "items" and names no fix. The `max_length` on
+        each field stays, for the form's schema.
+        """
+        limit, sentence = _LENGTH_LIMITS[str(info.field_name)]
+        if isinstance(value, str | SecretStr) and len(value) > limit:
+            raise PydanticCustomError("too_long", "{sentence}", {"sentence": sentence})
+        return value
+
+    @field_validator("host")
+    @classmethod
+    def _spelled_as_a_source_host(cls, value: str) -> str:
+        """The host spelled as an SFTP source spells its own, and its port.
+
+        `allows` compares the two as strings. A login stored for
+        `[2001:DB8:0::7]` or `sftp.example.com.` would otherwise be accepted
+        here and match no source, and the refusal would come at the first sync.
+        So the host is lower-cased, IDNA-encoded and an IPv6 address compressed
+        (:func:`app.core.sanitize.spelled_host`), one trailing dot is dropped,
+        and the port loses its leading zeros.
+        """
+        match = _HOST_AND_PORT.fullmatch(value)
+        if match is None or any(character.isspace() for character in value):
+            raise ValueError(_NOT_A_BOUND_HOST)
+        try:
+            host = spelled_host(match["host"].removesuffix("."))
+        except ValueError:
+            raise ValueError(_NOT_A_BOUND_HOST) from None
+        if ":" in host:
+            host = f"[{host}]"
+        if match["port"] is None:
+            return host
+        port = int(match["port"])
+        if not 1 <= port <= 65535:
+            raise ValueError(_NOT_A_BOUND_HOST)
+        return f"{host}:{port}"
+
+    @model_validator(mode="after")
+    def _one_method_and_a_key_that_can_be_read(self) -> SshCredentialsSecret:
+        """One way to log in, and a key whose header reads, within the ceiling.
+
+        With both a key and a password, the connector would have to guess which
+        one to offer. A passphrase beside a password is a second secret that
+        nothing reads. Only the key checks that cost nothing run here: see the
+        class docstring.
+        """
+        if (self.private_key is None) == (self.password is None):
+            raise ValueError("An SSH login needs a private key or a password, and not both.")
+        if self.passphrase is not None and self.private_key is None:
+            raise _refused_on("passphrase", "A passphrase goes with a private key.")
+        if self.private_key is not None:
+            refusal = _key_header_refusal(
+                self.private_key.get_secret_value(),
+                None if self.passphrase is None else self.passphrase.get_secret_value(),
+            )
+            if refusal is not None:
+                raise _refused_on(*refusal)
+        return self
 
 
 class EntraAppSecret(_SecretBase):
@@ -484,6 +966,7 @@ StorableSecret = Annotated[
     | GithubAppSecret
     | GoogleOAuthAppSecret
     | GitTokenSecret
+    | SshCredentialsSecret
     | EntraAppSecret
     | OpenAICodexSecret,
     Field(discriminator="kind"),
@@ -499,6 +982,7 @@ TypedSecret = Annotated[
     | GithubAppSecret
     | GoogleOAuthAppSecret
     | GitTokenSecret
+    | SshCredentialsSecret
     | EntraAppSecret,
     Field(discriminator="kind"),
 ]
@@ -520,6 +1004,7 @@ SecretValue = Annotated[
     | GithubAppSecret
     | GoogleOAuthAppSecret
     | GitTokenSecret
+    | SshCredentialsSecret
     | EntraAppSecret
     | OpenAICodexSecret,
     Field(discriminator="kind"),
@@ -528,7 +1013,11 @@ SecretValue = Annotated[
 
 STORABLE_KINDS: frozenset[SecretKind] = frozenset(SecretKind) - {SecretKind.NONE}
 
-_STORABLE_ADAPTER: TypeAdapter[StorableSecret] = TypeAdapter(StorableSecret)
+# The vault validates a decrypted payload through this. `hide_input_in_errors`
+# here, because pydantic reads it from the outermost schema only.
+_STORABLE_ADAPTER: TypeAdapter[StorableSecret] = TypeAdapter(
+    StorableSecret, config=ConfigDict(hide_input_in_errors=True)
+)
 
 
 def seal_secret(
@@ -603,6 +1092,7 @@ _KIND_MODELS: dict[SecretKind, type[BaseModel]] = {
     SecretKind.GITHUB_APP: GithubAppSecret,
     SecretKind.GOOGLE_OAUTH_APP: GoogleOAuthAppSecret,
     SecretKind.GIT_TOKEN: GitTokenSecret,
+    SecretKind.SSH_CREDENTIALS: SshCredentialsSecret,
     SecretKind.ENTRA_APP: EntraAppSecret,
     SecretKind.OPENAI_CODEX: OpenAICodexSecret,
 }
@@ -639,6 +1129,11 @@ _KIND_LABELS: dict[SecretKind, tuple[str, str]] = {
     SecretKind.GIT_TOKEN: (
         "Git access token",
         "A token that reads repositories over HTTPS, and the one host it may be sent to.",
+    ),
+    SecretKind.SSH_CREDENTIALS: (
+        "SSH login",
+        "A user name with a private key or a password, for an SFTP server, and the "
+        "one host it may be used with.",
     ),
     SecretKind.ENTRA_APP: (
         "Microsoft Entra app",

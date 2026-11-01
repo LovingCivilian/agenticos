@@ -11,7 +11,7 @@ from pydantic import Field, computed_field, field_validator, model_validator, Va
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.map_tiles import MapTiles, resolve as resolve_map_tiles
-from app.core.sanitize import METADATA_ADDRESSES, METADATA_HOSTS
+from app.core.sanitize import METADATA_ADDRESSES, METADATA_HOSTS, spelled_host
 
 SmtpTlsMode = Literal["auto", "implicit", "starttls"]
 """How an encrypted SMTP connection is opened: chosen by the port, or forced."""
@@ -25,6 +25,63 @@ def find_env_file() -> Path | None:
         if env_file.exists():
             return env_file
     return None
+
+
+def _unlistable(entry: str) -> bool:
+    """Whether a host allowlist entry can only be a cloud metadata service or this host.
+
+    The rule every host allowlist that opens the deployment's own network
+    shares, so the lists cannot drift apart: a metadata host or address,
+    `localhost` or a name below it, or a loopback, link-local or unspecified
+    address, an IPv4-mapped IPv6 form included. A trailing dot is folded because
+    a URL may keep one and still reach the same address, and an IPv4 address is
+    read the way the resolver reads it, so `2852039166` is `169.254.169.254`.
+    """
+    host = entry.strip().removeprefix("[").removesuffix("]").lower().rstrip(".")
+    if host in METADATA_HOSTS or host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return (
+        address.is_link_local
+        or address.is_loopback
+        or address.is_unspecified
+        or address in METADATA_ADDRESSES
+    )
+
+
+def _unlistable_refusal(setting: str, entry: str, consequence: str) -> ValueError:
+    """The refusal of an entry :func:`_unlistable` names, as the operator wrote it.
+
+    It names `setting` and ends with `consequence`, so the operator knows which
+    variable to correct and why.
+    """
+    return ValueError(
+        f"{setting} lists {entry!r}, a cloud metadata, link-local or loopback address. "
+        f"{consequence}"
+    )
+
+
+def _refuse_unlistable(setting: str, entries: list[str], consequence: str) -> list[str]:
+    """Refuse the first entry :func:`_unlistable` names.
+
+    Returns:
+        `entries`, unchanged.
+
+    Raises:
+        ValueError: :func:`_unlistable_refusal`'s sentence.
+    """
+    for entry in entries:
+        if _unlistable(entry):
+            raise _unlistable_refusal(setting, entry, consequence)
+    return entries
 
 
 class Settings(BaseSettings):
@@ -885,31 +942,59 @@ class Settings(BaseSettings):
         reach the same address, and an IPv4 address is read the way the
         resolver reads it, so `2852039166` is `169.254.169.254`.
         """
+        return _refuse_unlistable(
+            "MCP_ALLOWED_HOSTS", v, "A listed host skips the SSRF check, so remove it."
+        )
+
+    # Hosts a sync source may name although they resolve to a private or CGNAT
+    # address, such as a file server on the company network. Only the SFTP
+    # connector reads it: Git and website sources keep the plain address check.
+    # A listed host is still resolved, pinned and dialled at the address that was
+    # checked, never at a loopback, link-local or metadata one
+    # (`app.core.sanitize.resolve_pinned_url`). An entry is one host, a name or an
+    # address, as a source's host field takes it. The list is deployment-wide, so
+    # every organization's sources may reach a listed host. Empty refuses every
+    # internal address.
+    SYNC_ALLOWED_HOSTS: list[str] = []
+
+    @field_validator("SYNC_ALLOWED_HOSTS")
+    @classmethod
+    def validate_sync_allowed_hosts(cls, v: list[str]) -> list[str]:
+        """Refuse an entry that can only be a cloud metadata service or this host,
+        or that is not one host.
+
+        A listed host may resolve inside the network, but `169.254.169.254` or
+        `metadata.google.internal` is never a file server, only the instance's
+        credentials, and loopback is the API's own host. When a listed name
+        resolves to one of them, the connector refuses it again
+        (`_is_never_reachable` in `app.core.sanitize`). This refusal stops an
+        entry that names one outright, at startup.
+
+        The connector compares each entry, spelled by
+        :func:`app.core.sanitize.spelled_host`, with a source's host, and trusts
+        the spelled form. An entry that spelling refuses - a port, a scheme, a
+        path, a range, a wildcard, a trailing dot - could match no source. Kept,
+        it would read as open in the data-protection report while the source it
+        was meant for stays refused, so it stops the settings from loading. The
+        spelled form is checked again too: spelling folds a full-width or other
+        compatibility form the way the resolver reads it (IDNA's mapping, NFKC
+        and more), so `localhost` written in full-width letters is `localhost`.
+        `MCP_ALLOWED_HOSTS` keeps its own matching and does not take these two
+        rules.
+        """
+        consequence = "A listed host may resolve inside the network, so remove it."
+        _refuse_unlistable("SYNC_ALLOWED_HOSTS", v, consequence)
         for entry in v:
-            host = entry.strip().removeprefix("[").removesuffix("]").lower().rstrip(".")
-            if host in METADATA_HOSTS or host == "localhost" or host.endswith(".localhost"):
-                refused = True
-            else:
-                try:
-                    address = ipaddress.ip_address(host)
-                except ValueError:
-                    try:
-                        address = ipaddress.IPv4Address(socket.inet_aton(host))
-                    except OSError:
-                        address = None
-                if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-                    address = address.ipv4_mapped
-                refused = address is not None and (
-                    address.is_link_local
-                    or address.is_loopback
-                    or address.is_unspecified
-                    or address in METADATA_ADDRESSES
-                )
-            if refused:
+            try:
+                spelled = spelled_host(entry)
+            except ValueError:
                 raise ValueError(
-                    f"MCP_ALLOWED_HOSTS lists {entry!r}, a cloud metadata, link-local or "
-                    "loopback address. A listed host skips the SSRF check, so remove it."
-                )
+                    f"SYNC_ALLOWED_HOSTS lists {entry!r}, which is not one host. Write a host "
+                    "name or an IP address alone, e.g. files-01 or 10.0.0.5, with no port, "
+                    "scheme, path, range, wildcard or trailing dot."
+                ) from None
+            if _unlistable(spelled):
+                raise _unlistable_refusal("SYNC_ALLOWED_HOSTS", entry, consequence)
         return v
 
     @field_validator("CORS_ORIGINS")

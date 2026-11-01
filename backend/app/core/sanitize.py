@@ -4,6 +4,7 @@ URL validation to prevent SSRF attacks.
 """
 
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -151,9 +152,13 @@ def resolve_pinned_url(
 
     The one exemption is narrower than :func:`validate_webhook_url`'s. A host in
     `trusted_hosts` is still resolved and pinned, and may answer a private or
-    CGNAT address, but never one :func:`_is_never_reachable` names. Only the MCP
-    OAuth flow passes it, and only for a flow that began at a host on
-    `MCP_ALLOWED_HOSTS` (:func:`app.agents.mcp.trusted_hosts_for`).
+    CGNAT address, but never one :func:`_is_never_reachable` names. Two callers
+    pass it. The MCP OAuth flow does, only for a flow that began at a host on
+    `MCP_ALLOWED_HOSTS` (:func:`app.agents.mcp.trusted_hosts_for`); an MCP
+    connection's own URL takes `validate_webhook_url`'s wider exemption
+    instead. The SFTP sync connector does, with the hosts on
+    `SYNC_ALLOWED_HOSTS` spelled by :func:`spelled_host`
+    (`app.services.rag.connectors.sftp`).
 
     **Only a caller that dials the returned `ip` is protected from DNS
     rebinding.** A caller that takes the hostname back and connects by name
@@ -197,6 +202,54 @@ def resolve_pinned_url(
         allowed_schemes = WEBHOOK_ALLOWED_SCHEMES
     hostname, port = _checked_target(url, allowed_schemes)
     return _pinned(hostname, port, trusted=hostname in trusted_hosts)
+
+
+# One label of a host name, IDNA-encoded. An underscore is allowed: DNS, the
+# resolver and Docker's embedded DNS answer names such as `sftp_server`. Any
+# other character - a colon, a slash, an at sign, a star, a space - is refused
+# here, after the codec passed it through.
+_LABEL = re.compile(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
+
+
+def spelled_host(value: str) -> str:
+    """`value` as one host, spelled as `urlparse` spells the host of a URL built from it.
+
+    Lower case, an IPv6 address without brackets and in its compressed form, a
+    name IDNA-encoded. :func:`resolve_pinned_url` compares `trusted_hosts` with
+    that spelling exactly, so everything that names a host to it spells it this
+    way: an SFTP source's host, the host an SSH login is bound to, and each
+    `SYNC_ALLOWED_HOSTS` entry. One host then has one spelling, and a list entry
+    or a binding cannot fail to match because it was typed in another case or
+    form.
+
+    Raises:
+        ValueError: `value` is not one host alone. It holds a port, a scheme, a
+            path, a user, a wildcard, a range, an IPv6 zone, a space inside or a
+            trailing dot, or a label no host name can have.
+    """
+    host = value.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if "%" in host:
+        # An IPv6 zone names one of this machine's network interfaces.
+        raise ValueError("An IPv6 zone is not part of a host.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return address.compressed
+    try:
+        encoded = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("The host name is not a valid internationalized name.") from None
+    # The codec keeps a trailing dot, allows a hyphen at either end of a label, and
+    # passes ASCII punctuation through.
+    if len(encoded) > 253 or not all(_LABEL.fullmatch(label) for label in encoded.split(".")):
+        raise ValueError(
+            "Each part of a host name is 1 to 63 letters, digits, hyphens or underscores."
+        )
+    return encoded
 
 
 def _checked_target(url: str, allowed_schemes: frozenset[str]) -> tuple[str, int]:

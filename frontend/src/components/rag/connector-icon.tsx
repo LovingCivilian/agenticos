@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, Globe } from "lucide-react";
+import { Database, Globe, Server } from "lucide-react";
 
 import { BrandIcon, connectorBrand } from "@/components/icons/brand-icon";
 import { CONNECTOR_LOGOS } from "@/lib/connector-logos.generated";
@@ -23,7 +23,8 @@ const SIZES = {
  * its colours on a white tile, the same in both themes because the logos are
  * drawn for a light ground. A grey glyph in a grey circle read as one icon
  * repeated down the list. A connector with no baked logo takes its brand glyph,
- * the website connector a globe, anything else a database.
+ * the website connector a globe, an SFTP server a server, anything else a
+ * database.
  */
 export function ConnectorIcon({
   type,
@@ -36,7 +37,7 @@ export function ConnectorIcon({
 }) {
   const logo = CONNECTOR_LOGOS[ALIASES[type] ?? type];
   const brand = connectorBrand(type);
-  const Glyph = type === "web" ? Globe : Database;
+  const Glyph = type === "web" ? Globe : type === "sftp" ? Server : Database;
   return (
     <span
       aria-hidden

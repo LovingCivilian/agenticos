@@ -657,6 +657,8 @@ include = [
     "app/services/rag/connectors/web_page.py",
     # Which host is sent the Entra app's secret, its Graph token or neither.
     "app/services/rag/connectors/sharepoint.py",
+    # Which host is sent the SSH login, and what a server it chose may send back.
+    "app/services/rag/connectors/sftp.py",
     # The query strings a knowledge search runs, and the one place an expansion
     # failure is allowed to fall back to the plain query (#1649).
     "app/services/rag/query_analysis.py",
@@ -813,6 +815,8 @@ include = [
     # through publish (#2487).
     "app/services/model_outputs.py",
     "app/services/organization_secret.py",
+    # The child process that opens a pasted SSH private key before it is stored.
+    "app/services/ssh_key_check.py",
     "app/services/openai_codex.py",
     # Same shape and the same reason as `image_models`: what a picker offers is
     # decided by filtering a data file against what the platform can actually
@@ -1160,6 +1164,8 @@ include = [
     "app/services/rag/connectors/web_page.py",
     # Which host is sent the Entra app's secret, its Graph token or neither.
     "app/services/rag/connectors/sharepoint.py",
+    # Which host is sent the SSH login, and what a server it chose may send back.
+    "app/services/rag/connectors/sftp.py",
     # The query strings a knowledge search runs, and the one place an expansion
     # failure is allowed to fall back to the plain query (#1649).
     "app/services/rag/query_analysis.py",
@@ -1349,6 +1355,8 @@ include = [
     # through publish (#2487).
     "app/services/model_outputs.py",
     "app/services/organization_secret.py",
+    # The child process that opens a pasted SSH private key before it is stored.
+    "app/services/ssh_key_check.py",
     "app/services/openai_codex.py",
     # Same shape and the same reason as `image_models`: what a picker offers is
     # decided by filtering a data file against what the platform can actually

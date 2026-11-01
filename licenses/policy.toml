@@ -94,10 +94,16 @@ obligations = "File-level copyleft: the MPL-covered files stay under MPL and the
 fulfilled_by = "Unmodified; the wheel's LICENSE ships in the image; source at https://github.com/certifi/python-certifi."
 
 [review.python."tqdm"]
-license = "MPL-2.0"
+license = "MPL-2.0 AND MIT"
 status = "accepted"
-obligations = "MPL-2.0 for the library's own files (tqdm's LICENCE also carries MIT for parts). Source availability, unmodified."
+obligations = "MPL-2.0 for the library's own files and MIT for the parts its LICENCE names; that one file carries both texts. Source availability, unmodified."
 fulfilled_by = "Unmodified; the wheel's LICENCE ships in the image; source at https://github.com/tqdm/tqdm."
+
+[review.python."asyncssh"]
+license = "EPL-2.0 OR GPL-2.0-or-later"
+status = "accepted"
+obligations = "Weak copyleft at file level, as for MPL-2.0: ship the EPL-2.0 text, keep the notices in its files, and say where its source is (EPL-2.0 s.3.1(a), 3.2(b), 3.3). Taken under EPL-2.0. Every file header names GPL-2.0-or-later as a Secondary License; the platform does not elect it (EPL-2.0 FAQ 2.4). A deployment that puts asyncssh in a commercial product offering also takes on the s.4 indemnity for its own warranties. Used as the SFTP sync connector's SSH and SFTP client (app/services/rag/connectors/sftp.py) and to read the keys of an ssh_credentials secret (app/core/secret_kinds.py), imported unmodified as a separately installed pure-Python wheel."
+fulfilled_by = "Unmodified; the wheel's licenses/LICENSE (the EPL-2.0 text) is in the image under its dist-info, and the .py files in the image are its source, with their headers intact; source at https://github.com/ronf/asyncssh. EPL-2.0 leaves AgenticOS's own Apache-2.0 licence unchanged - its copyleft reaches only modified asyncssh files - as for the MPL-2.0 components and for elkjs, under EPL-2.0 in the backend image's Mermaid bundle."
 
 [review.npm."@img/sharp-libvips-linux-x64"]
 license = "LGPL-3.0-or-later"

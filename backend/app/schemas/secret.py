@@ -8,7 +8,7 @@ plaintext - reading one is the runtime's privilege, not a client's.
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.core.secret_kinds import SecretKind, SecretKindInfo, TypedSecret
 from app.schemas.base import BaseSchema, TimestampSchema
@@ -16,6 +16,11 @@ from app.schemas.resource_grant import VisibilityLiteral
 
 
 class SecretCreate(BaseSchema):
+    # A refused value is not repeated in `str()` or `repr()` of the error.
+    # Pydantic reads the setting from the outermost model only, so the value's own
+    # setting is not enough: an SSH login's passphrase would be shown whole.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     name: str = Field(
         min_length=1, max_length=128, description="How this secret is picked in the Builder"
     )
@@ -48,6 +53,9 @@ class SecretCreate(BaseSchema):
 
 class SecretUpdate(BaseSchema):
     """Rename, re-describe or rotate. Every field is optional; the kind is fixed."""
+
+    # As `SecretCreate`'s: the value's input stays out of the error's text.
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=1000)

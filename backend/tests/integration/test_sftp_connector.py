@@ -65,8 +65,11 @@ import secrets
 import shutil
 import socket
 import stat
+import struct
+import sys
 import tempfile
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -80,8 +83,8 @@ import anyio
 import asyncssh
 import pytest
 from asyncssh import SFTPAttrs, SFTPName
-from asyncssh.packet import SSHPacket
-from asyncssh.sftp import FXP_CLOSE, SFTPServerHandler
+from asyncssh.packet import SSHPacket, UInt32
+from asyncssh.sftp import FXP_CLOSE, FXP_OPENDIR, FXP_READDIR, SFTPServerHandler
 from pydantic import SecretStr
 
 from app.core.config import settings
@@ -95,7 +98,7 @@ from app.services.rag.connectors import (
     RemoteListing,
 )
 from app.services.rag.connectors import sftp as sftp_module
-from app.services.rag.connectors.sftp import SftpConnector
+from app.services.rag.connectors.sftp import SftpConfig, SftpConnector
 
 pytestmark = pytest.mark.anyio
 
@@ -163,6 +166,27 @@ def _typed(kind: int) -> SFTPAttrs:
     )
 
 
+class _Undecodable(SFTPAttrs):
+    """A regular file's attributes, sent with flags that promise a size and no size
+    after them: a reply asyncssh cannot decode, in a listing or in a stat.
+
+    asyncssh's records take their fields' defaults from the class's own
+    annotations, and a subclass has none, so they are copied from `SFTPAttrs`:
+    the server reads them to write the long name of a v3 listing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        for name, default in SFTPAttrs.__slots__.items():
+            setattr(self, name, default)
+        self.type = asyncssh.FILEXFER_TYPE_REGULAR
+        self.size = 4
+        self.permissions = stat.S_IFREG | 0o644
+
+    def encode(self, sftp_version: int) -> bytes:
+        return UInt32(asyncssh.FILEXFER_ATTR_SIZE)
+
+
 def _untyped(size: int) -> SFTPAttrs:
     """An entry a v3 server sent without permissions, so asyncssh reads its type as unknown."""
     return SFTPAttrs(size=size, atime=MTIME - DAY, mtime=MTIME)
@@ -224,6 +248,7 @@ class _Record:
     passwords: list[str] = field(default_factory=list)
     prompts_answered: list[list[str]] = field(default_factory=list)
     sessions: int = 0
+    channels: list[asyncssh.SSHServerChannel] = field(default_factory=list)
     denied: frozenset[bytes] = frozenset()
     after_first_read: dict[bytes, Callable[[], Awaitable[None]]] = field(default_factory=dict)
 
@@ -311,6 +336,7 @@ async def _serving(
     password: str | None = None,
     anyone: bool = False,
     prompt_only: bool = False,
+    compression: tuple[str, ...] = ("none",),
 ) -> AsyncIterator[int]:
     """Listen on a loopback port the system chooses; the port, while the block runs."""
     acceptor = await asyncssh.listen(
@@ -327,6 +353,7 @@ async def _serving(
         ),
         sftp_factory=sftp,
         gss_host=None,
+        compression_algs=list(compression),
     )
     try:
         yield acceptor.get_port()
@@ -347,6 +374,7 @@ class _DiskSFTP(asyncssh.SFTPServer):
         self._record = record
         self._open: dict[int, bytes] = {}
         record.sessions += 1
+        record.channels.append(chan)
 
     def _path(self, file_obj: object) -> bytes:
         return self._open.get(id(file_obj), b"")
@@ -426,6 +454,8 @@ class _Folder:
     OPENDIR with that error, and `drop` breaks the connection there. `endless`
     sends names without end: `"special"` links, FIFOs and sockets, or `"dots"`.
     `close_stall` holds the CLOSE of each listing of it opened from then on.
+    `reset` resets the TCP connection at the OPENDIR, as a firewall does.
+    `opened` is set once the server has answered an OPENDIR of it.
     """
 
     entries: list[tuple[bytes, SFTPAttrs]] = field(default_factory=list)
@@ -436,6 +466,8 @@ class _Folder:
     stall: bool = False
     refusal: asyncssh.SFTPError | None = None
     drop: bool = False
+    reset: bool = False
+    opened: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # Which request each step of `_STEPS` is: the request, and how many came before it.
@@ -458,7 +490,8 @@ class _Fake:
     does. `reads` answers each READ; without it, the slice of `data` asked for. A
     CLOSE raises `close_error`, or with `close_stall` is never answered while the
     test runs. `stall_at`, a step of `_STEPS`, is a request of the fetch that is
-    never answered.
+    never answered. `reset_at`, `"lstat"` or `"close"`, resets the TCP connection
+    at that request.
     """
 
     data: bytes = b""
@@ -470,6 +503,7 @@ class _Fake:
     close_error: asyncssh.SFTPError | None = None
     close_stall: bool = False
     stall_at: str | None = None
+    reset_at: str | None = None
     asked: dict[str, int] = field(default_factory=dict)
     paused: dict[str, int] = field(default_factory=dict)
 
@@ -616,6 +650,18 @@ class _HostileSFTP(asyncssh.SFTPServer):
     def _seen(self, request: str, path: bytes) -> None:
         self._hostile.record.calls.append((request, path))
 
+    def _reset(self) -> None:
+        """End the TCP connection with a reset rather than a close: a zero linger
+        makes the kernel send RST, which the client reads as `ConnectionResetError`."""
+        sock = self.connection.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.connection.abort()
+
+    def _reset_at(self, path: bytes, request: str) -> None:
+        fake = self._hostile.files.get(path)
+        if fake is not None and fake.reset_at == request:
+            self._reset()
+
     def scandir(self, path: bytes) -> AsyncIterator[SFTPName]:
         self._seen("scandir", path)
         # A real server resolves `..` and a doubled slash; so does this one.
@@ -626,6 +672,9 @@ class _HostileSFTP(asyncssh.SFTPServer):
             raise type(folder.refusal)(folder.refusal.reason)
         if folder.drop:
             self.connection.abort()
+        if folder.reset:
+            self._reset()
+        folder.opened.set()
         names = self._hostile.names(folder)
         if folder.close_stall:
             self._hostile.held.append(names)
@@ -633,6 +682,7 @@ class _HostileSFTP(asyncssh.SFTPServer):
 
     async def lstat(self, path: bytes) -> SFTPAttrs:
         self._seen("lstat", path)
+        self._reset_at(path, "lstat")
         await self._hostile.pause(path, "lstat")
         return self._hostile.answer(path, "lstat")
 
@@ -650,6 +700,10 @@ class _HostileSFTP(asyncssh.SFTPServer):
             raise type(fake.open_error)(fake.open_error.reason)
         return path
 
+    async def open56(self, path: bytes, desired_access: int, flags: int, attrs: SFTPAttrs) -> bytes:
+        """The OPEN of SFTP v5 and v6, answered as `open` answers v3's."""
+        return await self.open(path, asyncssh.FXF_READ, attrs)
+
     async def read(self, file_obj: object, offset: int, size: int) -> bytes:
         path = cast(bytes, file_obj)
         self._seen("read", path)
@@ -664,6 +718,7 @@ class _HostileSFTP(asyncssh.SFTPServer):
     async def close(self, file_obj: object) -> None:
         path = cast(bytes, file_obj)
         self._seen("close", path)
+        self._reset_at(path, "close")
         fake = self._hostile.files[path]
         if fake.close_stall:
             await self._hostile.release.wait()
@@ -687,6 +742,51 @@ def _hold_folder_closes(monkeypatch: pytest.MonkeyPatch, hostile: _Hostile) -> N
         return await answer(handler, packet)
 
     monkeypatch.setitem(SFTPServerHandler._packet_handlers, FXP_CLOSE, close)
+
+
+def _count_readdirs(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Every READDIR the server answers from now on, as the handle it names.
+
+    asyncssh's server answers a READDIR itself, from the iterator the OPENDIR
+    made, so the count goes in front of its handler for that request.
+    """
+    answer = SFTPServerHandler._packet_handlers[FXP_READDIR]
+    handles: list[bytes] = []
+
+    async def readdir(handler: SFTPServerHandler, packet: SSHPacket) -> object:
+        handles.append(SSHPacket(packet.get_remaining_payload()).get_string())
+        return await answer(handler, packet)
+
+    monkeypatch.setitem(SFTPServerHandler._packet_handlers, FXP_READDIR, readdir)
+    return handles
+
+
+def _count_open_folders(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The number of folder handles open on the server after each OPENDIR it answers."""
+    opendir = SFTPServerHandler._packet_handlers[FXP_OPENDIR]
+    close = SFTPServerHandler._packet_handlers[FXP_CLOSE]
+    open_now: list[int] = []
+    folders: set[bytes] = set()
+
+    async def opened(handler: SFTPServerHandler, packet: SSHPacket) -> object:
+        handle = await opendir(handler, packet)
+        folders.add(cast(bytes, handle))
+        open_now.append(len(folders))
+        return handle
+
+    async def closed(handler: SFTPServerHandler, packet: SSHPacket) -> object:
+        folders.discard(SSHPacket(packet.get_remaining_payload()).get_string())
+        return await close(handler, packet)
+
+    monkeypatch.setitem(SFTPServerHandler._packet_handlers, FXP_OPENDIR, opened)
+    monkeypatch.setitem(SFTPServerHandler._packet_handlers, FXP_CLOSE, closed)
+    return open_now
+
+
+def _deleted(hostile: _Hostile, path: str) -> None:
+    """`path` deleted since the listing: out of its folder, and "no such file" to an LSTAT."""
+    hostile.unlist(path)
+    hostile.files[path.encode()].lstats = [asyncssh.SFTPNoSuchFile("No such file")]
 
 
 class _Writer(Protocol):
@@ -1122,6 +1222,30 @@ async def test_an_unchanged_file_lists_and_reads_with_the_same_revision(
     assert fetched.path.read_bytes() == body
     if server.record is not None:
         assert server.record.seen("open", path) == server.record.seen("close", path) == 1
+        # One READ per chunk, and none past the size the open handle reported.
+        assert server.record.seen("read", path) == -(-size // sftp_module.CHUNK_BYTES)
+
+
+@pytest.mark.parametrize(
+    "size", [0, 4, sftp_module.CHUNK_BYTES], ids=["empty", "small", "one-chunk"]
+)
+async def test_a_read_stops_at_the_size_the_handle_reported(
+    hostile: _Hostile, connector: SftpConnector, out: Path, size: int
+) -> None:
+    """Once the bytes reach the size the open handle reported, there is nothing left
+    to ask for: a last READ would only answer the end of the file, one round trip
+    for nothing on every file. An empty file is read with no READ at all. A file
+    that grew meanwhile still shows in the stats after the read."""
+    body = b"x" * size
+    hostile.add_file("/files/sized.pdf", _Fake(data=body))
+    listed = (await _listed_hostile(connector, hostile, "/files"))["/files/sized.pdf"]
+
+    fetched = await connector.fetch_file(
+        listed, out, config=hostile.config("/files"), credential=hostile.credential
+    )
+
+    assert fetched.path.read_bytes() == body
+    assert hostile.record.seen("read", "/files/sized.pdf") == (1 if size else 0)
 
 
 async def test_a_file_changed_after_the_listing_is_read_as_its_new_version(
@@ -1323,6 +1447,253 @@ async def test_a_file_that_answers_no_such_file_and_is_no_longer_listed_is_skipp
         assert hostile.record.seen("read", path) == 0
 
 
+async def test_many_deletions_in_one_folder_cost_one_listing_of_it(
+    hostile: _Hostile, connector: SftpConnector, out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop folder: a partner uploads, a consumer removes what it picked up, and
+    the first sync of a large folder takes hours. Each file removed meanwhile
+    answers "no such file", and only a listing of its folder shows it went. One
+    listing answers for every file the sync then finds gone in that folder, so 30
+    deletions cost the READDIRs of one listing - three answers of the server's 128
+    names and the end - not of 30."""
+    for number in range(300):
+        hostile.add_file(f"/drop/file-{number:03d}.pdf", _Fake(data=b"file"))
+    listed = await _listed_hostile(connector, hostile, "/drop")
+    readdirs = _count_readdirs(monkeypatch)
+    gone = [f"/drop/file-{number:03d}.pdf" for number in range(0, 300, 10)]
+    for path in gone:
+        _deleted(hostile, path)
+    config = hostile.config("/drop")
+
+    for path in gone:
+        with pytest.raises(ChangedSinceListing):
+            await connector.fetch_file(
+                listed[path], out, config=config, credential=hostile.credential
+            )
+
+    assert len(readdirs) == 4
+    assert hostile.record.seen("scandir", "/drop") == 2
+
+
+async def test_a_file_deleted_after_its_folder_was_listed_for_another_is_seen_as_deleted(
+    hostile: _Hostile, connector: SftpConnector, out: Path
+) -> None:
+    """The listing a deletion leaves behind still names the files that were there
+    then. One of them deleted later must not be taken for a file the server lists
+    and says does not exist: a kept listing that names the file is made again,
+    and the newer one replaces it."""
+    for name in ("first", "second", "third"):
+        hostile.add_file(f"/drop/{name}.pdf", _Fake(data=b"file"))
+    listed = await _listed_hostile(connector, hostile, "/drop")
+    config = hostile.config("/drop")
+
+    for name in ("first", "second"):
+        _deleted(hostile, f"/drop/{name}.pdf")
+        with pytest.raises(ChangedSinceListing) as raised:
+            await connector.fetch_file(
+                listed[f"/drop/{name}.pdf"], out, config=config, credential=hostile.credential
+            )
+        assert raised.value.message == f"{name}.pdf was deleted before it was downloaded."
+
+    assert hostile.record.seen("scandir", "/drop") == 3
+
+
+async def test_the_listings_kept_for_deletions_stay_under_max_names(
+    hostile: _Hostile, connector: SftpConnector, out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server decides how many names a folder holds, so the kept listings
+    together stay under `MAX_NAMES`. Past it, the older ones are let go, and a
+    later deletion in their folder lists it again."""
+    for folder in ("a", "b"):
+        for number in range(6):
+            hostile.add_file(f"/drop/{folder}/{number}.pdf", _Fake(data=b"file"))
+    listed = await _listed_hostile(connector, hostile, "/drop")
+    monkeypatch.setattr(sftp_module, "MAX_NAMES", 10)
+    config = hostile.config("/drop")
+
+    async def fetch(path: str) -> None:
+        with pytest.raises(ChangedSinceListing):
+            await connector.fetch_file(
+                listed[path], out, config=config, credential=hostile.credential
+            )
+
+    for path in ("/drop/a/0.pdf", "/drop/a/1.pdf", "/drop/a/2.pdf", "/drop/b/0.pdf"):
+        _deleted(hostile, path)
+    # Five names in /drop/a, the dots among them, kept.
+    await fetch("/drop/a/0.pdf")
+    await fetch("/drop/a/1.pdf")
+    assert hostile.record.seen("scandir", "/drop/a") == 2
+    # Seven in /drop/b: twelve together, past ten, so /drop/a is let go.
+    await fetch("/drop/b/0.pdf")
+    await fetch("/drop/a/2.pdf")
+    assert hostile.record.seen("scandir", "/drop/a") == 3
+
+
+def _owned(
+    *,
+    uid: int | None = 1001,
+    gid: int | None = 1001,
+    owner: str | None = None,
+    group: str | None = None,
+    mode: int = 0o644,
+    size: int = 4,
+    mtime: int = MTIME,
+) -> SFTPAttrs:
+    """A regular file with an owner, a group and a mode, of 4 bytes unless told."""
+    return SFTPAttrs(
+        type=asyncssh.FILEXFER_TYPE_REGULAR,
+        size=size,
+        permissions=stat.S_IFREG | mode,
+        uid=uid,
+        gid=gid,
+        owner=owner,
+        group=group,
+        atime=mtime - DAY,
+        mtime=mtime,
+    )
+
+
+_LISTED_V3 = _owned()
+_LISTED_V6 = _owned(uid=None, gid=None, owner="mallory", group="writers")
+# The SFTP version, then what the listing, the LSTAT before the OPEN and the FSTAT of
+# the handle answer.
+_SWAPPED_IN: dict[str, tuple[int, SFTPAttrs, SFTPAttrs, SFTPAttrs]] = {
+    "uid": (3, _LISTED_V3, _LISTED_V3, _owned(uid=0)),
+    "gid": (3, _LISTED_V3, _LISTED_V3, _owned(gid=1000)),
+    "mode": (3, _LISTED_V3, _LISTED_V3, _owned(mode=0o640)),
+    "owner": (6, _LISTED_V6, _LISTED_V6, _owned(uid=None, gid=None, owner="root", group="writers")),
+    "group": (6, _LISTED_V6, _LISTED_V6, _owned(uid=None, gid=None, owner="mallory", group="foo")),
+    # ProFTPD's LSTAT follows a link, so it answers as the target does, and only the
+    # listing still has the owner of the listed file.
+    "link-before-the-lstat": (3, _LISTED_V3, _owned(uid=0, gid=0), _owned(uid=0, gid=0)),
+    # The same, to a private file of the same owner: its mode tells, against the
+    # listing's, once its size or its mtime shows the file moved since the listing.
+    "link-before-the-lstat-other-size": (
+        3,
+        _LISTED_V3,
+        _owned(mode=0o600, size=16),
+        _owned(mode=0o600, size=16),
+    ),
+    "link-before-the-lstat-other-mtime": (
+        3,
+        _LISTED_V3,
+        _owned(mode=0o600, mtime=MTIME + 100),
+        _owned(mode=0o600, mtime=MTIME + 100),
+    ),
+    # A listing whose mode is faked, as ProFTPD's `DirFakeMode` does, and a file that
+    # changed since: its mode is compared with the listing's, and it fails once.
+    "changed-under-a-faked-mode": (
+        3,
+        _owned(mode=0o640),
+        _owned(size=5, mtime=MTIME + 60),
+        _owned(size=5, mtime=MTIME + 60),
+    ),
+}
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("field_name", list(_SWAPPED_IN))
+async def test_an_open_file_that_is_not_the_listed_one_is_refused_before_a_byte_is_read(
+    hostile: _Hostile,
+    connector: SftpConnector,
+    out: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    """SFTP v3 cannot open a path without following a link, so a file swapped for a
+    link after the listing is opened through it: on OpenSSH between the LSTAT and
+    the OPEN, on ProFTPD from the listing on. Where FSTAT reads the open file, the
+    other file shows: in its owner or group against the listing, in its mode against
+    the LSTAT just before the OPEN, and against the listing too once that LSTAT's
+    size or mtime shows the file moved since the listing - ProFTPD's LSTAT follows
+    the link and answers as the target. The fetch is refused before a byte of it is
+    read, with a sentence that says what to look at. Owner and group are names from
+    SFTP v4."""
+    version, listed, path_stat, opened = _SWAPPED_IN[field_name]
+    if version == 6:
+        _answer_sftp_version(monkeypatch, 6)
+    path = "/files/swap\x85ped.pdf"
+    hostile.add_file(path, _Fake(data=b"data", lstats=[path_stat], fstats=[opened]), listed=listed)
+    found = (await _listed_hostile(connector, hostile, "/files"))[path]
+
+    with pytest.raises(ExternalServiceError) as raised:
+        await connector.fetch_file(
+            found, out, config=hostile.config("/files"), credential=hostile.credential
+        )
+
+    assert raised.value.message == (
+        "The server opened a file for swap?ped.pdf that is not the file it listed. "
+        "Check that nobody can replace files in this folder with links."
+    )
+    assert hostile.record.seen("read", path) == 0
+    assert hostile.record.seen("close", path) == 1
+
+
+@pytest.mark.parametrize(
+    ("version", "listed", "path_stat", "opened"),
+    [
+        pytest.param(3, _LISTED_V3, _LISTED_V3, _LISTED_V3, id="v3-the-same"),
+        pytest.param(6, _LISTED_V6, _LISTED_V6, _LISTED_V6, id="v6-the-same"),
+        pytest.param(
+            3,
+            _owned(uid=None, gid=None),
+            _owned(uid=0, gid=0),
+            _owned(uid=0, gid=0),
+            id="listing-omits-owner",
+        ),
+        pytest.param(3, _owned(), _owned(), _owned(uid=None, gid=None), id="fstat-omits-owner"),
+        # ProFTPD's `DirFakeMode`: the listing reports a configured mode, and the
+        # LSTAT and the FSTAT the real one.
+        pytest.param(3, _owned(mode=0o640), _owned(), _owned(), id="listing-fakes-the-mode"),
+        # A listing with no size says nothing about whether the file moved since, so
+        # its faked mode is not compared either.
+        pytest.param(
+            3,
+            SFTPAttrs(
+                type=asyncssh.FILEXFER_TYPE_REGULAR,
+                permissions=stat.S_IFREG | 0o640,
+                uid=1001,
+                gid=1001,
+                atime=MTIME - DAY,
+                mtime=MTIME,
+            ),
+            _owned(),
+            _owned(),
+            id="listing-omits-the-size-and-fakes-the-mode",
+        ),
+    ],
+)
+async def test_an_open_file_is_compared_with_the_listing_only_where_both_answer(
+    hostile: _Hostile,
+    connector: SftpConnector,
+    out: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
+    listed: SFTPAttrs,
+    path_stat: SFTPAttrs,
+    opened: SFTPAttrs,
+) -> None:
+    """An unchanged file answers its FSTAT as its listing entry and its LSTAT did, on
+    every server tested. A field one of two answers leaves out says nothing about
+    the file, so it is not compared, and such a file reads. Nor is the listing's
+    mode: ProFTPD's `DirFakeMode` puts a configured mode in a listing, while the
+    LSTAT and the FSTAT report the real one, and every file would fail on every run."""
+    if version == 6:
+        _answer_sftp_version(monkeypatch, 6)
+    hostile.add_file(
+        "/files/kept.pdf",
+        _Fake(data=b"data", lstats=[path_stat], fstats=[opened]),
+        listed=listed,
+    )
+    found = (await _listed_hostile(connector, hostile, "/files"))["/files/kept.pdf"]
+
+    fetched = await connector.fetch_file(
+        found, out, config=hostile.config("/files"), credential=hostile.credential
+    )
+
+    assert fetched.path.read_bytes() == b"data"
+
+
 async def test_a_server_whose_fstat_and_lstat_disagree_still_reads_an_unchanged_file(
     hostile: _Hostile, connector: SftpConnector, out: Path
 ) -> None:
@@ -1407,7 +1778,9 @@ async def test_a_file_whose_mtime_or_type_alone_moves_during_the_read_is_skipped
 
 
 @pytest.mark.security
-@pytest.mark.parametrize("parent", ["refused", "failed", "too-long", "stalled"])
+@pytest.mark.parametrize(
+    "parent", ["refused", "failed", "too-long", "stalled", "past-the-file-deadline"]
+)
 async def test_a_folder_listing_that_cannot_answer_is_no_evidence_that_a_file_is_gone(
     hostile: _Hostile,
     connector: SftpConnector,
@@ -1418,7 +1791,9 @@ async def test_a_folder_listing_that_cannot_answer_is_no_evidence_that_a_file_is
     """A file the server answers "no such file" for is gone only when a listing of
     its folder answers, and no longer names it. A folder the server refuses to
     list, fails to list, stops answering, or that holds more than `MAX_NAMES`
-    names cannot answer. The file is out of the folder here too, so only that rule
+    names, or that is still answering when the file's `FILE_SECONDS` run out
+    (each READDIR has its own deadline, so a server could answer each in
+    time with one name) cannot answer. The file is out of the folder here too, so only that rule
     keeps it from being taken for a deletion and skipped on every run while the
     sync reports success. It is the server's failure, a refusal included: the
     folder was listed a moment ago. The server's own text stays out of it."""
@@ -1435,9 +1810,12 @@ async def test_a_folder_listing_that_cannot_answer_is_no_evidence_that_a_file_is
         folder.refusal = asyncssh.SFTPFailure("SERVER-TEXT: failure")
     elif parent == "too-long":
         monkeypatch.setattr(sftp_module, "MAX_NAMES", 5)
-    else:
+    elif parent == "stalled":
         monkeypatch.setattr(sftp_module, "REQUEST_SECONDS", 1.0)
         folder.stall = True
+    else:
+        monkeypatch.setattr(sftp_module, "FILE_SECONDS", 0.5)
+        folder.delay = 1.0
 
     with anyio.fail_after(30), pytest.raises(ExternalServiceError) as raised:
         await connector.fetch_file(
@@ -1544,6 +1922,118 @@ async def test_a_name_that_is_not_utf8_is_left_out_and_the_rest_are_listed(
 
 
 @pytest.mark.security
+async def test_a_name_or_a_path_longer_than_a_file_system_allows_is_left_out_and_noted(
+    hostile: _Hostile, connector: SftpConnector
+) -> None:
+    """One SFTP packet can carry a name of megabytes, and a queued folder holds its
+    whole path, so the server would decide how much memory a listing takes. A
+    real file system holds a name of 255 bytes and a path of 4,096. A longer one
+    is left out and noted, as a name with a slash is, and a folder of such a name
+    is never opened."""
+    hostile.add_entry("/long", b"n" * 251 + b".pdf", _regular(4))
+    hostile.add_entry("/long", b"n" * 252 + b".pdf", _regular(4))
+    hostile.add_entry("/long", b"d" * 256, _typed(stat.S_IFDIR))
+    hostile.folders[b"/long/" + b"d" * 256] = _Folder(entries=[(b"inside.pdf", _regular(4))])
+    # Sixteen folders of 254 bytes make a path of 4,085 bytes.
+    deep = "/long/" + "/".join(chr(ord("a") + level) * 254 for level in range(16))
+    hostile.add_entry(deep, b"short.pdf", _regular(4))
+    hostile.add_entry(deep, b"a-longer-name.pdf", _regular(4))
+
+    listing = await connector.list_files(hostile.config("/long"), hostile.credential)
+
+    assert sorted(file.id for file in listing.files) == sorted(
+        ["/long/" + "n" * 251 + ".pdf", f"{deep}/short.pdf"]
+    )
+    assert listing.problems == [
+        "The server listed 2 names in /long that are not file names, so they were left out.",
+        f"The server listed 1 names in {deep} that are not file names, so they were left out.",
+    ]
+    assert listing.complete is True
+    assert hostile.record.seen("scandir", "/long/" + "d" * 256) == 0
+
+
+@pytest.mark.security
+async def test_control_characters_in_a_name_are_shown_as_question_marks(
+    hostile: _Hostile, connector: SftpConnector, out: Path
+) -> None:
+    """Whoever can upload to the server names its files and folders, and a name may
+    hold a line break, an escape or a C1 control. An unreadable folder named so
+    would put lines of its own into the sync log and the failure notification -
+    "could not be read.", then "Your SFTP login expired." Every name in our
+    sentences shows such a character as `?`, and so do U+2028 and U+2029, which
+    break a line for `str.splitlines`, mail clients and log tools. The file
+    itself lists under its own name."""
+    forged = "x could not be read.\nYour SFTP login expired.\x1b[2K\x85\x7f\u2028\u2029"
+    hostile.add_folder(f"/ctl/{forged}").refusal = asyncssh.SFTPPermissionDenied("denied")
+    hostile.add_entry("/ctl/tab\there", b"a/b.pdf", _regular(2))
+    hostile.add_file(
+        "/ctl/line\nbreak.pdf", _Fake(data=b"text", lstats=[asyncssh.SFTPFailure("no")])
+    )
+
+    listing = await connector.list_files(hostile.config("/ctl"), hostile.credential)
+    with pytest.raises(ExternalServiceError) as raised:
+        await connector.fetch_file(
+            listing.files[0], out, config=hostile.config("/ctl"), credential=hostile.credential
+        )
+
+    assert [file.id for file in listing.files] == ["/ctl/line\nbreak.pdf"]
+    # Each folder's sentences come in the order of its path, whichever was read first.
+    assert listing.problems == [
+        "The server listed 1 names in /ctl/tab?here that are not file names, so they were left out.",
+        "The folder /ctl/x could not be read.?Your SFTP login expired.?[2K???? could not be read.",
+    ]
+    assert raised.value.message == "The server refused to read line?break.pdf."
+
+
+_FORGED = "gone\nERROR app.core.auth admin password reset for root\u2028"
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "where", ["subfolder", "root", "denied-read", "failed-read", "close", "parent"]
+)
+async def test_a_server_s_message_reaches_the_worker_log_on_one_line(
+    hostile: _Hostile,
+    connector: SftpConnector,
+    out: Path,
+    caplog: pytest.LogCaptureFixture,
+    where: str,
+) -> None:
+    """The server's own text goes to the worker log and nowhere else, and it is the
+    server's to write: a status message with a line break would write a log line of
+    its own. Each log line gets the text escaped, never the exception object, which
+    the formatter would turn into text after the log filter ran."""
+    caplog.set_level(logging.WARNING, logger=sftp_module.__name__)
+    hostile.add_file("/logs/file.pdf", _Fake(data=b"file"))
+    config = hostile.config("/logs")
+    if where in ("subfolder", "root"):
+        failing = hostile.add_folder("/logs/sub" if where == "subfolder" else "/logs")
+        failing.refusal = asyncssh.SFTPFailure(_FORGED)
+        with contextlib.suppress(ExternalServiceError):
+            await connector.list_files(config, hostile.credential)
+    else:
+        listed = await _listed_hostile(connector, hostile, "/logs")
+        fake = hostile.files[b"/logs/file.pdf"]
+        if where == "denied-read":
+            fake.lstats = [asyncssh.SFTPPermissionDenied(_FORGED)]
+        elif where == "failed-read":
+            fake.lstats = [asyncssh.SFTPFailure(_FORGED)]
+        elif where == "close":
+            fake.close_error = asyncssh.SFTPFailure(_FORGED)
+        else:
+            fake.lstats = [asyncssh.SFTPNoSuchFile("No such file")]
+            hostile.add_folder("/logs").refusal = asyncssh.SFTPFailure(_FORGED)
+        with contextlib.suppress(BadRequestError, ExternalServiceError):
+            await connector.fetch_file(
+                listed["/logs/file.pdf"], out, config=config, credential=hostile.credential
+            )
+
+    lines = [caplog.handler.format(record) for record in caplog.records]
+    assert any("gone?ERROR" in line for line in lines)
+    assert all("\n" not in line and "\u2028" not in line for line in lines)
+
+
+@pytest.mark.security
 async def test_links_to_a_file_a_folder_out_of_the_root_and_a_loop_are_never_listed_or_opened(
     server: _Served, connector: SftpConnector
 ) -> None:
@@ -1634,6 +2124,11 @@ async def test_a_missing_or_unreadable_root_is_refused(
 
     if isinstance(raised.value, BadRequestError):
         assert raised.value.message == expected
+    else:
+        assert raised.value.message == (
+            f"{HOST} could not list the folder {path}. Check that it is a folder the account "
+            "may read."
+        )
 
 
 async def test_a_source_without_subfolders_never_opens_one(
@@ -1717,12 +2212,177 @@ async def test_a_folder_the_server_fails_to_list_fails_the_root_and_is_a_problem
     if where == "root":
         with pytest.raises(ExternalServiceError) as raised:
             await connector.list_files(hostile.config("/broken"), hostile.credential)
-        assert "SERVER-TEXT" not in raised.value.message
+        assert raised.value.message == (
+            f"{HOST} could not list the folder /broken. Check that it is a folder the "
+            "account may read."
+        )
     else:
         listing = await connector.list_files(hostile.config("/broken"), hostile.credential)
         assert [file.id for file in listing.files] == ["/broken/ok.pdf"]
         assert listing.problems == ["The folder /broken/sub could not be read."]
         assert listing.complete is False
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("where", ["subfolder", "root", "fetch"])
+async def test_an_answer_the_worker_cannot_decode_is_the_server_s_fault(
+    hostile: _Hostile, connector: SftpConnector, out: Path, where: str
+) -> None:
+    """A reply whose flags promise a field that does not follow, or that ends too
+    early, cannot be decoded. That is the server's fault like any refusal: below
+    the root the folder is a problem and the listing is incomplete, the root fails
+    with its sentence, and a file fails as one the server refused to read. Raised
+    as asyncssh's own decode error, it would fail the whole listing for one
+    folder, and the sync log would send the user to check the credential. The session stays usable: each reply has
+    its length, so the next folder and the next file read."""
+    hostile.add_file("/mal/ok.pdf", _Fake(data=b"ok!!"))
+    hostile.add_file("/mal/sub2/inner.pdf", _Fake(data=b"in!!"))
+    # Last in its folder, so the reply ends where the size should be.
+    hostile.add_entry("/mal" if where == "root" else "/mal/sub", b"x.pdf", _Undecodable())
+    config = hostile.config("/mal")
+
+    if where == "root":
+        with pytest.raises(ExternalServiceError) as raised:
+            await connector.list_files(config, hostile.credential)
+        assert raised.value.message == (
+            f"{HOST} could not list the folder /mal. Check that it is a folder the account "
+            "may read."
+        )
+        return
+    if where == "subfolder":
+        listing = await connector.list_files(config, hostile.credential)
+        assert sorted(file.id for file in listing.files) == ["/mal/ok.pdf", "/mal/sub2/inner.pdf"]
+        assert listing.problems == ["The folder /mal/sub could not be read."]
+        assert listing.complete is False
+        return
+    listed = await _listed_hostile(connector, hostile, "/mal")
+    hostile.files[b"/mal/ok.pdf"].lstats = [_regular(4), _Undecodable()]
+    with pytest.raises(ExternalServiceError) as refused:
+        await connector.fetch_file(
+            listed["/mal/ok.pdf"], out, config=config, credential=hostile.credential
+        )
+    fetched = await connector.fetch_file(
+        listed["/mal/sub2/inner.pdf"], out, config=config, credential=hostile.credential
+    )
+    assert refused.value.message == "The server refused to read ok.pdf."
+    assert fetched.path.read_bytes() == b"in!!"
+    assert hostile.record.seen("close", "/mal/ok.pdf") == 1
+
+
+async def test_a_listing_reads_four_folders_at_once_and_no_more(
+    hostile: _Hostile,
+    connector: SftpConnector,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder costs about four round trips, and one at a time a link of 50 ms
+    would reach `LISTING_SECONDS` short of `MAX_FOLDERS`. Up to
+    `LISTING_CONCURRENCY` folders are read at once on the one session, and no more,
+    so the server sees at most four folder handles of the sync open. Not eight:
+    asyncssh decodes a whole READDIR reply before the walk sees an entry, so each
+    reader can hold about 123 MiB of a hostile reply."""
+    for number in range(20):
+        hostile.add_file(f"/wide/sub-{number:02d}/file.pdf", _Fake(data=b"wide"))
+    open_now = _count_open_folders(monkeypatch)
+
+    listing = await connector.list_files(hostile.config("/wide"), hostile.credential)
+
+    assert max(open_now) == sftp_module.LISTING_CONCURRENCY == 4
+    assert len(listing.files) == 20
+    assert listing.complete is True
+
+
+async def test_a_listing_names_its_files_in_path_order(
+    hostile: _Hostile, connector: SftpConnector
+) -> None:
+    """Folders finish in an order that timing decides, and the root is read before
+    the folders below it. The files are handed over sorted by path, so one tree
+    lists the same way on every run."""
+    hostile.add_file("/sorted/z-last.pdf", _Fake(data=b"zzzz"))
+    hostile.add_file("/sorted/a/first.pdf", _Fake(data=b"aaaa"))
+    hostile.add_file("/sorted/m/middle.pdf", _Fake(data=b"mmmm"))
+
+    listing = await connector.list_files(hostile.config("/sorted"), hostile.credential)
+
+    assert [file.id for file in listing.files] == [
+        "/sorted/a/first.pdf",
+        "/sorted/m/middle.pdf",
+        "/sorted/z-last.pdf",
+    ]
+
+
+async def test_a_sync_parses_its_config_once(
+    hostile: _Hostile, connector: SftpConnector, out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parsing the config reads the host key with asyncssh, and the sync hands the
+    same config to the listing and to each file. It is parsed once for the sync,
+    not once for each file."""
+    for number in range(3):
+        hostile.add_file(f"/files/{number}.pdf", _Fake(data=b"file"))
+    parsed: list[object] = []
+    real_validate = SftpConfig.model_validate
+
+    def model_validate(obj: object, *args: object, **kwargs: object) -> SftpConfig:
+        parsed.append(obj)
+        return real_validate(obj, *args, **kwargs)
+
+    monkeypatch.setattr(SftpConfig, "model_validate", model_validate)
+    config = hostile.config("/files")
+
+    listing = await connector.list_files(config, hostile.credential)
+    for file in listing.files:
+        await connector.fetch_file(file, out, config=config, credential=hostile.credential)
+
+    assert len(parsed) == 1
+
+
+async def test_a_stall_beside_other_folders_fails_the_listing_with_the_stall(
+    hostile: _Hostile, connector: SftpConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Several folders are read at once, and one of them stalls. The connection is
+    aborted, which fails the others' requests too. The listing fails whole, with
+    the stall as its reason, and the next listing opens a new connection."""
+    monkeypatch.setattr(sftp_module, "REQUEST_SECONDS", 1.0)
+    for name in ("a", "b", "c", "d"):
+        hostile.add_file(f"/listing/{name}/inner.pdf", _Fake(data=b"inner"))
+    hostile.add_folder("/listing/b").stall = True
+    hostile.add_file("/fine/ok.pdf", _Fake(data=b"fine"))
+
+    with anyio.fail_after(30):
+        with pytest.raises(ExternalServiceError) as raised:
+            await connector.list_files(hostile.config("/listing"), hostile.credential)
+        listing = await connector.list_files(hostile.config("/fine"), hostile.credential)
+
+    assert raised.value.message == f"{HOST} did not answer within 1 seconds."
+    assert [file.id for file in listing.files] == ["/fine/ok.pdf"]
+    assert len(hostile.record.connections) == 2
+
+
+async def test_a_cancelled_listing_stops_its_folder_readers(
+    hostile: _Hostile, connector: SftpConnector
+) -> None:
+    """A sync can be cancelled while it lists: the job's time limit, a worker that
+    shuts down. The folders being read are cancelled with it, and their requests
+    with them, so nothing is left reading on a connection the sync let go, and
+    the cancel does not wait out a request's deadline."""
+    hostile.add_file("/slow/top.pdf", _Fake(data=b"top!"))
+    for name in ("a", "b", "c"):
+        hostile.add_folder(f"/slow/{name}").stall = True
+    listing = asyncio.ensure_future(
+        connector.list_files(hostile.config("/slow"), hostile.credential)
+    )
+
+    with anyio.fail_after(10):
+        await hostile.add_folder("/slow/c").opened.wait()
+        listing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await listing
+
+    readers = [
+        task
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "") == "SftpConnector._visit"
+    ]
+    assert readers == []
 
 
 @pytest.mark.parametrize("stalled", ["root", "subfolder"])
@@ -1768,6 +2428,60 @@ async def test_a_connection_lost_during_a_listing_fails_it_whole_and_the_next_li
 
     assert raised.value.message == f"The connection to {HOST} was lost."
     assert [file.id for file in listing.files] == ["/fine/ok.pdf"]
+    assert len(hostile.record.connections) == 2
+
+
+async def test_a_connection_reset_during_a_listing_fails_it_whole_and_the_next_listing_reconnects(
+    hostile: _Hostile, connector: SftpConnector
+) -> None:
+    """A firewall, a NAT or a load balancer that times a connection out resets it,
+    and asyncssh hands each pending request the `OSError` as it is. That is a lost
+    connection like any other: the listing fails whole with our sentence, so
+    nothing is removed, and the next listing opens a new connection."""
+    hostile.add_file("/listing/ok.pdf", _Fake(data=b"ok"))
+    hostile.add_file("/listing/sub/inner.pdf", _Fake(data=b"inner"))
+    hostile.add_folder("/listing/sub").reset = True
+    hostile.add_file("/fine/ok.pdf", _Fake(data=b"fine"))
+
+    with anyio.fail_after(30):
+        with pytest.raises(ExternalServiceError) as raised:
+            await connector.list_files(hostile.config("/listing"), hostile.credential)
+        listing = await connector.list_files(hostile.config("/fine"), hostile.credential)
+
+    assert raised.value.message == f"The connection to {HOST} was lost."
+    assert [file.id for file in listing.files] == ["/fine/ok.pdf"]
+    assert len(hostile.record.connections) == 2
+
+
+@pytest.mark.parametrize("reset_at", ["lstat", "close"])
+async def test_a_connection_reset_during_a_fetch_is_a_lost_connection_and_the_next_file_reconnects(
+    hostile: _Hostile, connector: SftpConnector, out: Path, reset_at: str
+) -> None:
+    """A reset before the read fails the file with our sentence. A reset at the
+    CLOSE comes after the bytes and both stats, so the file's result stands, as
+    for any CLOSE that fails. Either way the next file reads on a new connection."""
+    hostile.add_file("/files/reset.pdf", _Fake(data=b"the reset file", reset_at=reset_at))
+    hostile.add_file("/files/next.pdf", _Fake(data=b"the next file"))
+    listed = await _listed_hostile(connector, hostile, "/files")
+    config = hostile.config("/files")
+
+    with anyio.fail_after(30):
+        if reset_at == "lstat":
+            with pytest.raises(ExternalServiceError) as raised:
+                await connector.fetch_file(
+                    listed["/files/reset.pdf"], out, config=config, credential=hostile.credential
+                )
+            assert raised.value.message == f"The connection to {HOST} was lost."
+        else:
+            fetched = await connector.fetch_file(
+                listed["/files/reset.pdf"], out, config=config, credential=hostile.credential
+            )
+            assert fetched.path.read_bytes() == b"the reset file"
+        following = await connector.fetch_file(
+            listed["/files/next.pdf"], out, config=config, credential=hostile.credential
+        )
+
+    assert following.path.read_bytes() == b"the next file"
     assert len(hostile.record.connections) == 2
 
 
@@ -2161,15 +2875,18 @@ def _names_of_dots(hostile: _Hostile, monkeypatch: pytest.MonkeyPatch) -> _Bound
 
 
 def _names_across_folders(hostile: _Hostile, monkeypatch: pytest.MonkeyPatch) -> _BoundCase:
-    """`MAX_NAMES` is one count for the whole listing: five folders of 100 links stay
-    under it one by one, and pass it together, so the last ones are never opened."""
+    """`MAX_NAMES` is one count for the whole listing: twenty folders of 100 links
+    stay under it one by one, and pass it together, so the last ones are never
+    opened. There are more of them than `LISTING_CONCURRENCY` folders read at once."""
     monkeypatch.setattr(sftp_module, "MAX_NAMES", 300)
-    for folder in range(5):
+    for folder in range(20):
         for number in range(100):
-            hostile.add_entry(f"/several/sub-{folder}", b"link-%03d" % number, _typed(stat.S_IFLNK))
+            hostile.add_entry(
+                f"/several/sub-{folder:02d}", b"link-%03d" % number, _typed(stat.S_IFLNK)
+            )
 
     def check(listing: RemoteListing) -> None:
-        assert hostile.record.seen("scandir", "/several/sub-4") == 0
+        assert hostile.record.seen("scandir", "/several/sub-19") == 0
 
     return "/several", check
 
@@ -2190,20 +2907,46 @@ def _files(hostile: _Hostile, monkeypatch: pytest.MonkeyPatch) -> _BoundCase:
     return "/many", check
 
 
+def _listed_bytes(hostile: _Hostile, monkeypatch: pytest.MonkeyPatch) -> _BoundCase:
+    """The listed files' paths together stay under `MAX_LISTED_BYTES`. Each path may
+    have 4,096 bytes, and `MAX_FILES` of them would be gigabytes of memory, so a
+    deep folder of long paths stops the walk before the count does. A path is charged the memory Python holds for
+    it: each name here holds an emoji, which makes Python store every character
+    of the path in four bytes, where its UTF-8 length is about a quarter of that. So the paths listed hold just under the budget. Fifteen folders of
+    254 bytes, and 300 files."""
+    monkeypatch.setattr(sftp_module, "MAX_LISTED_BYTES", 1024 * 1024)
+    deep = "/paths/" + "/".join(chr(ord("a") + level) * 254 for level in range(15))
+    for number in range(300):
+        hostile.add_file(f"{deep}/file-{number:03d}-\U0001f600.pdf", _Fake(data=b"long"))
+
+    def check(listing: RemoteListing) -> None:
+        held = sum(sys.getsizeof(file.id) for file in listing.files)
+        assert 0 < len(listing.files) < 300
+        assert held <= 1024 * 1024 < held + sys.getsizeof(listing.files[0].id)
+        assert listing.problems == [
+            f"The listing of {HOST} stopped at 1 MB of file paths, so the files after them "
+            "were not read. Choose a narrower folder."
+        ]
+
+    return "/paths", check
+
+
 def _time_between_empty_folders(hostile: _Hostile, monkeypatch: pytest.MonkeyPatch) -> _BoundCase:
     """`LISTING_SECONDS` passes in a walk of empty folders that send not even `.`
     and `..`, each READDIR slow. All of them are queued before the deadline, and no
     entry ever arrives to be checked, so the check before each folder is what
-    stops the walk short of the last folder."""
+    stops the walk short of the last folder. There are five times as many folders
+    as are read at once, so that holds whether a server answers its requests one
+    at a time, as this one does, or several at once."""
     monkeypatch.setattr(sftp_module, "LISTING_SECONDS", 1.0)
-    for number in range(10):
-        empty = hostile.add_folder(f"/hollow/empty-{number}")
+    for number in range(40):
+        empty = hostile.add_folder(f"/hollow/empty-{number:02d}")
         empty.dots, empty.delay = False, 0.3
     hostile.add_folder("/hollow").dots = False
 
     def check(listing: RemoteListing) -> None:
         opened = [call for call in hostile.record.calls if call[1].startswith(b"/hollow/")]
-        assert len(opened) < 10
+        assert len(opened) < 40
 
     return "/hollow", check
 
@@ -2230,6 +2973,7 @@ _BOUNDS: dict[str, Callable[[_Hostile, pytest.MonkeyPatch], _BoundCase]] = {
     "names-of-dots": _names_of_dots,
     "names-across-folders": _names_across_folders,
     "files": _files,
+    "listed-bytes": _listed_bytes,
     "time-between-empty-folders": _time_between_empty_folders,
     "time-inside-a-folder": _time_inside_a_folder,
 }
@@ -2253,6 +2997,59 @@ async def test_a_listing_stops_at_each_bound_and_says_so(
     assert len(listing.problems) == 1
     assert listing.problems[0].endswith("Choose a narrower folder.")
     check(listing)
+
+
+@pytest.mark.security
+async def test_a_listing_queues_no_more_folders_than_it_may_open(
+    hostile: _Hostile, connector: SftpConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server can list a hundred thousand folders in one. A folder is queued only
+    while the folders opened and queued stay under `MAX_FOLDERS`, so the queue
+    never holds more than a listing may open. The rest are left out, the bound is
+    said once, and the folders already queued are still read."""
+    monkeypatch.setattr(sftp_module, "MAX_FOLDERS", 10)
+    for number in range(200):
+        hostile.add_file(f"/wide/sub-{number:03d}/file.pdf", _Fake(data=b"wide"))
+    lengths: list[int] = []
+
+    class _Queue(deque[tuple[str, int]]):
+        def append(self, item: tuple[str, int]) -> None:
+            super().append(item)
+            lengths.append(len(self))
+
+    monkeypatch.setattr(sftp_module, "deque", _Queue)
+
+    listing = await connector.list_files(hostile.config("/wide"), hostile.credential)
+
+    assert max(lengths) < 10
+    assert len([call for call in hostile.record.calls if call[0] == "scandir"]) == 10
+    assert len(listing.files) == 9
+    assert listing.problems == [
+        f"The listing of {HOST} stopped at 10 folders, so the folders after them were not "
+        "read. Choose a narrower folder."
+    ]
+    assert listing.complete is False
+
+
+async def test_an_ascii_tree_of_long_paths_is_charged_what_python_holds(
+    hostile: _Hostile, connector: SftpConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python stores an ASCII path at one byte a character, so it is charged about
+    its length against `MAX_LISTED_BYTES`. Charged four bytes a character, as for
+    the widest string, a real tree of long paths would stop at the budget and
+    fail on every run. Here 200 paths of 3,844 ASCII characters hold about
+    780 KB under a budget of 1 MiB, and four bytes a character would count 3 MB."""
+    monkeypatch.setattr(sftp_module, "MAX_LISTED_BYTES", 1024 * 1024)
+    deep = "/paths/" + "/".join(chr(ord("a") + level) * 254 for level in range(15))
+    for number in range(200):
+        hostile.add_file(f"{deep}/file-{number:03d}.pdf", _Fake(data=b"long"))
+
+    listing = await connector.list_files(hostile.config("/paths"), hostile.credential)
+
+    assert len(listing.files) == 200
+    assert 4 * sum(len(file.id) for file in listing.files) > 1024 * 1024
+    assert listing.complete is True
+    assert listing.problems == []
 
 
 async def test_a_stalled_read_aborts_and_the_next_file_reconnects(
@@ -2342,6 +3139,40 @@ async def test_a_connection_the_server_closed_between_files_is_opened_again(
 
     assert fetched.path.read_bytes() == b"the second file"
     assert len(record.connections) == 2
+
+
+@pytest.mark.parametrize("ended_by", ["close", "unreadable-packet"])
+async def test_an_sftp_session_the_server_ended_between_files_is_opened_again(
+    disk: _Served, connector: SftpConnector, out: Path, ended_by: str
+) -> None:
+    """OpenSSH's `ChannelTimeout` ends an idle SFTP session and keeps the SSH
+    connection open, and so do an `sftp-server` that exits and a packet asyncssh
+    cannot read. A sync idles while it embeds a long file. Kept, the ended session
+    would answer every later file "not open", and the sync would blame the server
+    for refusing each one. The next file opens a new connection and reads."""
+    record = disk.record
+    assert record is not None
+    first, second = disk.path("first.pdf"), disk.path("second.pdf")
+    await disk.writer.write(first, b"the first file")
+    await disk.writer.write(second, b"the second file")
+    listed = await _listed(connector, disk)
+    await connector.fetch_file(listed[first], out, config=disk.config(), credential=disk.login)
+
+    channel = record.channels[0]
+    if ended_by == "close":
+        channel.close()
+    else:
+        # A status of five bytes, with no code: asyncssh ends the session it came on.
+        channel.write(b"\x00\x00\x00\x05\x65\x00\x00\x99\x99")
+    with anyio.fail_after(5):
+        await channel.wait_closed()
+    await asyncio.sleep(0.1)
+    fetched = await connector.fetch_file(
+        listed[second], out, config=disk.config(), credential=disk.login
+    )
+
+    assert fetched.path.read_bytes() == b"the second file"
+    assert record.sessions == 2
 
 
 async def test_a_download_past_its_deadline_fails_and_the_next_file_reads(
@@ -2568,6 +3399,38 @@ async def test_a_server_that_lets_anyone_in_is_refused(
 
     assert raised.value.message == _login_refused()
     assert record.sessions == 0
+
+
+@pytest.mark.security
+async def test_a_server_that_offers_only_compression_is_refused(
+    host_key: asyncssh.SSHKey,
+    client_key: asyncssh.SSHKey,
+    connector: SftpConnector,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asyncssh inflates a compressed packet with no bound on what it inflates to,
+    and 250 MB of zeros fit in one packet of 256 KiB. The worker offers no
+    compression, so a server that insists on it fails the key exchange, before
+    the login."""
+    record = _Record()
+    (tmp_path / "srv" / "drop").mkdir(parents=True)
+    sftp = partial(_DiskSFTP, root=tmp_path / "srv", record=record)
+    async with _serving(
+        record, host_key, sftp, authorized=client_key, compression=("zlib@openssh.com",)
+    ) as port:
+        _pin(monkeypatch, port)
+
+        with pytest.raises(BadRequestError) as raised:
+            await connector.list_files(
+                _config(port, _line(host_key), "/drop"), _ssh_login(port, key=client_key)
+            )
+
+    assert raised.value.message == (
+        f"{HOST} and this worker could not agree on a host key or a cipher. "
+        "Check that the server has a key of the type in this source's settings."
+    )
+    assert record.logins == []
 
 
 @pytest.mark.security

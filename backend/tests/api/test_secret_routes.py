@@ -5,6 +5,7 @@
 actually return - and the one thing that must never appear in any of it.
 """
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from app.core.config import settings
 from app.core.permissions import AuthContext, OrgRoleName
 from app.core.secret_kinds import SecretKind
 from app.main import app
+from tests.test_secrets import _key_text, _openssh_key_with, _quadratic_der_paste
 
 pytestmark = [pytest.mark.anyio, pytest.mark.security]
 
@@ -186,6 +188,154 @@ class TestWriting:
 
         assert response.status_code == 204
         assert service.delete.call_args.args[1] == _SECRET_ID
+
+
+def _ssh_login_asking_for(rounds: int) -> dict[str, str]:
+    """An SSH login whose encrypted key asks for `rounds` bcrypt rounds, with a wrong passphrase."""
+    return {
+        "kind": "ssh_credentials",
+        "username": "partner-sync",
+        "host": "sftp.example.com",
+        "private_key": _openssh_key_with(rounds=rounds),
+        "passphrase": "not-the-passphrase",
+    }
+
+
+class TestAKeyThatAsksForTooMuchWork:
+    """An encrypted SSH key names its own key derivation cost: about 5 ms a bcrypt
+    round, up to 2**32 - 1 rounds, paid before a wrong passphrase shows.
+
+    FastAPI parses a request body on the event loop, after the route's gate and
+    before the route runs. `PATCH /secrets/{id}` has no gate, so any signed-in
+    caller reaches the parse. It must refuse such a key from its header, without
+    decrypting it: 2**20 rounds would hold the API process for an hour and a
+    half.
+    """
+
+    async def test_it_is_refused_fast_on_create(self, client, service) -> None:
+        async with client() as opened:
+            started = time.perf_counter()
+            response = await opened.post(
+                _url(""),
+                json={
+                    "name": "Partner drop",
+                    "purpose": "sftp",
+                    "value": _ssh_login_asking_for(2**20),
+                },
+            )
+
+        assert time.perf_counter() - started < 1.0
+        assert response.status_code == 422
+        assert "too many key derivation rounds" in response.text
+        assert service.create.await_count == 0
+
+    async def test_it_is_refused_fast_on_a_patch_by_a_caller_who_may_not_edit_secrets(
+        self, client, service
+    ) -> None:
+        viewer = AuthContext(
+            user_id=uuid.uuid4(), organization_id=_ORGANIZATION_ID, role=OrgRoleName.VIEWER
+        )
+        app.dependency_overrides[deps.get_auth_context] = lambda: viewer
+
+        async with client() as opened:
+            started = time.perf_counter()
+            response = await opened.patch(
+                _url(f"/{_SECRET_ID}"), json={"value": _ssh_login_asking_for(2**20)}
+            )
+
+        assert time.perf_counter() - started < 1.0
+        assert response.status_code == 422
+        assert service.update.await_count == 0
+
+    async def test_a_caller_who_may_not_edit_secrets_is_refused_before_the_body_is_read(
+        self, client, service
+    ) -> None:
+        """`POST /secrets` is gated on `secrets:edit`, and the gate answers first."""
+        viewer = AuthContext(
+            user_id=uuid.uuid4(), organization_id=_ORGANIZATION_ID, role=OrgRoleName.VIEWER
+        )
+        app.dependency_overrides[deps.get_auth_context] = lambda: viewer
+
+        async with client() as opened:
+            response = await opened.post(
+                _url(""),
+                json={
+                    "name": "Partner drop",
+                    "purpose": "sftp",
+                    "value": _ssh_login_asking_for(2**20),
+                },
+            )
+
+        assert response.status_code == 403
+        assert service.create.await_count == 0
+
+
+class TestAPasteTooLongToDecode:
+    """The header check decodes an encrypted key's DER on the event loop, before
+    the service has authorized anything, and asyncssh's decoder is quadratic. The
+    field's length limit refuses such a paste before anything decodes it."""
+
+    @pytest.mark.parametrize("form", ["sequence", "oid"])
+    @pytest.mark.parametrize("role", [OrgRoleName.OWNER, OrgRoleName.VIEWER])
+    async def test_it_is_refused_fast_on_create_and_on_a_patch(
+        self, client, service, role: str, form: str
+    ) -> None:
+        """A viewer has no `secrets:edit`: POST refuses them at the gate, and PATCH,
+        which has no gate, refuses them here, before the service sees the id."""
+        caller = AuthContext(user_id=uuid.uuid4(), organization_id=_ORGANIZATION_ID, role=role)
+        app.dependency_overrides[deps.get_auth_context] = lambda: caller
+        paste = _quadratic_der_paste(form)
+        value = {
+            "kind": "ssh_credentials",
+            "username": "partner-sync",
+            "host": "sftp.example.com",
+            "private_key": paste,
+        }
+
+        async with client() as opened:
+            started = time.perf_counter()
+            created = await opened.post(
+                _url(""), json={"name": "Partner drop", "purpose": "sftp", "value": value}
+            )
+            patched = await opened.patch(_url(f"/{_SECRET_ID}"), json={"value": value})
+
+        assert time.perf_counter() - started < 1.0
+        assert created.status_code == (422 if role == OrgRoleName.OWNER else 403)
+        assert patched.status_code == 422
+        assert "private_key" in patched.text
+        body = paste.splitlines()[10]
+        assert body not in created.text
+        assert body not in patched.text
+        assert service.create.await_count == 0
+        assert service.update.await_count == 0
+
+
+class TestAKeyRefusedByThePasteCheck:
+    async def test_the_refusal_names_the_key_field_for_the_form(self, client, service) -> None:
+        """The vault form marks an input by the end of the field path. An
+        encrypted key without its passphrase - the most common paste mistake -
+        is named on the key, with our sentence and no pydantic prefix."""
+        value = {
+            "kind": "ssh_credentials",
+            "username": "partner-sync",
+            "host": "sftp.example.com",
+            "private_key": _key_text("openssh-encrypted"),
+        }
+
+        async with client() as opened:
+            response = await opened.post(
+                _url(""), json={"name": "Partner drop", "purpose": "sftp", "value": value}
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["details"]["fields"] == [
+            {
+                "field": "value.ssh_credentials.private_key",
+                "message": "The private key could not be read. Paste the whole key file, and "
+                "give its passphrase if it has one.",
+            }
+        ]
+        assert service.create.await_count == 0
 
 
 class TestSigningInWithChatGPT:

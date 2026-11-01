@@ -154,5 +154,14 @@
     "help_url": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
     "description": "A Microsoft Entra app registration a SharePoint or OneDrive sync source reads a site with. Grant it Sites.Selected on that site, not Files.Read.All.",
     "icon": "microsoft"
+  },
+  {
+    "id": "sftp",
+    "label": "SFTP server",
+    "category": "connector",
+    "kind": "ssh_credentials",
+    "help_url": "https://man.openbsd.org/ssh-keygen.1",
+    "description": "An SSH login an SFTP sync source reads a folder with, bound to its host. Prefer a key to a password.",
+    "icon": ""
   }
 ]

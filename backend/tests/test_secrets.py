@@ -6,21 +6,46 @@ constraint: **a secret is referenced, never handed around.** Most of what is
 worth testing here is that constraint holding.
 """
 
+import asyncio
+import base64
+import contextlib
 import functools
 import json
+import math
+import os
+import sys
+import threading
+import time
 import traceback
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
 import pytest
+from asyncssh.asn1 import der_decode, der_encode
+from asyncssh.packet import Byte, MPInt, SSHPacket, String, UInt32
 from pydantic import ValidationError
 
 from app.core import secret_kinds
-from app.core.exceptions import AlreadyExistsError, BadRequestError, NotFoundError
+from app.core.exceptions import (
+    AlreadyExistsError,
+    BadRequestError,
+    ExternalServiceError,
+    InternalError,
+    NotFoundError,
+)
 from app.core.permissions import AuthContext, OrgRoleName
 from app.core.secret_kinds import (
+    KEY_PARSE_ERRORS,
+    MAX_KEY_ITERATIONS,
+    MAX_KEY_ROUNDS,
+    MAX_PASSWORD_CHARACTERS,
+    MAX_PBKDF2_KEY_BYTES,
+    MAX_PRIVATE_KEY_CHARACTERS,
     MIN_CREDENTIAL_LENGTH,
     STORABLE_KINDS,
     ApiKeySecret,
@@ -38,7 +63,10 @@ from app.core.secret_kinds import (
 )
 from app.core.vault import VaultScope, seal
 from app.repositories import member_repo
+from app.schemas.secret import SecretCreate, SecretUpdate
+from app.services import organization_secret
 from app.services.organization_secret import OrganizationSecretService
+from app.services.ssh_key_check import KeyReport, inspect
 from tests.test_model_profiles import service_account_json
 
 pytestmark = pytest.mark.security
@@ -363,9 +391,317 @@ def _first_body_line_lost(text: str) -> str:
 
 
 def _chained_from_none(refused: pytest.ExceptionInfo[ValidationError]) -> bool:
-    """Whether the refusal's own `ValueError` drops the asyncssh exception it replaced."""
-    error = refused.value.errors()[0]["ctx"]["error"]
-    return error.__cause__ is None and error.__suppress_context__ is True
+    """Whether the refusal carries no exception of the parser's.
+
+    A refusal located at its field carries none at all. A refusal raised as our
+    own `ValueError` must drop the asyncssh exception it replaced.
+    """
+    error = (refused.value.errors()[0].get("ctx") or {}).get("error")
+    return error is None or (error.__cause__ is None and error.__suppress_context__ is True)
+
+
+def _pem(name: str, body: bytes, headers: str = "") -> str:
+    """A PEM block named `name` around `body`, with `headers` above it, as a person pastes it."""
+    encoded = base64.b64encode(body).decode()
+    lines = [encoded[i : i + 64] for i in range(0, len(encoded), 64)]
+    head = [headers.rstrip("\n"), ""] if headers else []
+    return "\n".join([f"-----BEGIN {name}-----", *head, *lines, f"-----END {name}-----", ""])
+
+
+def _pem_body(text: str) -> bytes:
+    """The bytes inside a PEM block, its headers left out."""
+    lines = text.strip().splitlines()[1:-1]
+    return base64.b64decode("".join(line for line in lines if ":" not in line))
+
+
+_OPENSSH_MAGIC = b"openssh-key-v1\0"
+
+
+def _openssh_key_with(*, rounds: int = 16, kdf: bytes = b"bcrypt") -> str:
+    """The encrypted OpenSSH test key with its key derivation header rewritten.
+
+    Nothing is encrypted again. The header is all the parse reads, and a key
+    sealed with 2**20 rounds would take an hour and a half to make.
+    """
+    packet = SSHPacket(_pem_body(_key_text("openssh-encrypted"))[len(_OPENSSH_MAGIC) :])
+    cipher, _, options = packet.get_string(), packet.get_string(), packet.get_string()
+    salt = SSHPacket(options).get_string()
+    rest = packet.get_remaining_payload()
+    header = String(cipher) + String(kdf) + String(String(salt) + UInt32(rounds))
+    return _pem("OPENSSH PRIVATE KEY", _OPENSSH_MAGIC + header + rest)
+
+
+def _pkcs8_key_with_iterations(
+    count: int, *, pbe_version: int = 2, key_length: int | None = None
+) -> str:
+    """An encrypted PKCS#8 test key with its iteration count rewritten.
+
+    asyncssh writes 2,048, for PBES2 and for PBES1 alike, and no PBKDF2 key
+    length; `key_length` adds one after the count. Nothing is encrypted again,
+    for the reason given above.
+    """
+    scheme = {} if pbe_version == 2 else {"cipher_name": "des-cbc", "hash_name": "md5"}
+    text = _ssh_key("ssh-ed25519").export_private_key(
+        "pkcs8-pem", PASSPHRASE, pbe_version=pbe_version, **scheme
+    )
+
+    def rewritten(node: object) -> object:
+        if isinstance(node, tuple):
+            items = tuple(rewritten(item) for item in node)
+            if key_length is not None and len(node) >= 2 and node[1] == 2048:
+                return (*items[:2], key_length, *items[2:])
+            return items
+        return count if isinstance(node, int) and node == 2048 else node
+
+    body = der_encode(rewritten(der_decode(_pem_body(text.decode()))))
+    return _pem("ENCRYPTED PRIVATE KEY", body)
+
+
+def _pkcs1_key_with_a_negative_number() -> str:
+    """The RSA test key with its private exponent made negative.
+
+    `cryptography`'s RSA constructor refuses it with an `OverflowError`, which
+    is not a `ValueError`.
+    """
+    numbers = list(der_decode(_pem_body(_key_text("pkcs1"))))
+    numbers[3] = -numbers[3]
+    return _pem("RSA PRIVATE KEY", der_encode(tuple(numbers)))
+
+
+@functools.cache
+def _rsa_4096() -> asyncssh.SSHKey:
+    """The largest RSA key a login may hold. Made once: it takes seconds."""
+    return asyncssh.generate_private_key("ssh-rsa", key_size=4096)
+
+
+def _mersenne_rsa_key(p_exponent: int, q_exponent: int) -> str:
+    """A valid PKCS#1 RSA key whose primes are the Mersenne primes 2**p - 1 and 2**q - 1.
+
+    Known primes of any size are public, so anyone can build such a key in a
+    moment, and validating it costs about the cube of its size.
+    """
+    p, q = (1 << p_exponent) - 1, (1 << q_exponent) - 1
+    lam = (p - 1) * (q - 1) // math.gcd(p - 1, q - 1)
+    e = next(c for c in range(65537, 1 << 20, 2) if math.gcd(c, lam) == 1)
+    d = pow(e, -1, lam)
+    numbers = (0, p * q, e, d, p, q, d % (p - 1), d % (q - 1), pow(q, -1, p))
+    return _pem("RSA PRIVATE KEY", der_encode(numbers))
+
+
+def _rsa_key_with_a_prime_of_one(passphrase: str | None = None) -> str:
+    """An OpenSSH RSA key whose second prime is 1, plain or encrypted with `passphrase`.
+
+    asyncssh's OpenSSH decoder computes `d % (q - 1)` before anything validates
+    the key, so it raises `ZeroDivisionError`. Written by asyncssh's own export,
+    with only the RSA numbers swapped in, because `cryptography` refuses to hold
+    such a key.
+    """
+    key = _ssh_key("ssh-rsa")
+    numbers = key.pyca_key.private_numbers()
+    public = numbers.public_numbers
+    section = b"".join(
+        MPInt(x) for x in (public.n, public.e, numbers.d, numbers.iqmp, numbers.p, 1)
+    )
+    with patch.object(type(key), "encode_ssh_private", lambda _self: section):
+        return key.export_private_key(
+            "openssh", passphrase, rounds=16, ignore_few_rounds=True
+        ).decode()
+
+
+def _rsa_key_with_a_crt_exponent_off_by_two() -> str:
+    """The RSA test key with dmp1 two too large: still odd, and wrong.
+
+    The worker's import refuses it. An OpenSSH re-export would not show it,
+    because that form computes dmp1 again.
+    """
+    numbers = list(der_decode(_pem_body(_key_text("pkcs1"))))
+    numbers[6] += 2
+    return _pem("RSA PRIVATE KEY", der_encode(tuple(numbers)))
+
+
+def _security_key_private_key() -> str:
+    """An OpenSSH `sk-ssh-ed25519` private key: a handle for a hardware authenticator.
+
+    Built by hand, as `ssh-keygen -t ed25519-sk` writes one, so no device is needed.
+    """
+    algorithm = b"sk-ssh-ed25519@openssh.com"
+    public_key = _ssh_key("ssh-ed25519").public_data[-32:]
+    public = String(algorithm) + String(public_key) + String(b"ssh:")
+    private = (
+        UInt32(9) + UInt32(9) + public + Byte(1) + String(bytes(64)) + String(b"") + String(b"c")
+    )
+    private += bytes(range(1, (8 - len(private) % 8) % 8 + 1))
+    body = (
+        _OPENSSH_MAGIC
+        + String(b"none")
+        + String(b"none")
+        + String(b"")
+        + UInt32(1)
+        + String(public)
+        + String(private)
+    )
+    return _pem("OPENSSH PRIVATE KEY", body)
+
+
+def _der_length(size: int) -> bytes:
+    if size < 0x80:
+        return bytes([size])
+    octets = size.to_bytes((size.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(octets)]) + octets
+
+
+def _quadratic_der_paste(form: str) -> str:
+    """An ENCRYPTED PRIVATE KEY block that asyncssh's DER decoder reads in quadratic time.
+
+    `sequence`: one SEQUENCE of 800,000 NULLs, a 2.19 MB request body, which the
+    decoder copies the rest of for each element (15 s). `oid`: one OBJECT
+    IDENTIFIER whose arc runs 400,000 bytes, a 0.55 MB body, which grows a big
+    integer one byte at a time (8.5 s).
+    """
+    if form == "sequence":
+        content = b"\x05\x00" * 800_000
+        der = b"\x30" + _der_length(len(content)) + content
+    else:
+        arc = b"\x2a" + b"\xff" * 400_000 + b"\x01"
+        oid = b"\x06" + _der_length(len(arc)) + arc
+        der = b"\x30" + _der_length(len(oid)) + oid
+    return _pem("ENCRYPTED PRIVATE KEY", der)
+
+
+def _child(code: str) -> tuple[str, ...]:
+    """A child process that runs `code` in place of the key check."""
+    return (sys.executable, "-I", "-c", code)
+
+
+def _recording_children(
+    monkeypatch: pytest.MonkeyPatch, spawned: asyncio.Event | None = None, count: int = 1
+) -> list[SimpleNamespace]:
+    """Each child process the key check starts, with its pid and when it started.
+
+    `spawned` is set once `count` children exist.
+    """
+    children: list[SimpleNamespace] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def recording(*command: str, **options: object) -> asyncio.subprocess.Process:
+        started = time.perf_counter()
+        process = await spawn(*command, **options)
+        children.append(SimpleNamespace(pid=process.pid, started=started))
+        if spawned is not None and len(children) >= count:
+            spawned.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+    return children
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this pid still exists, reaped or not."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@dataclass
+class _LoopLag:
+    longest: float = 0.0
+    most_threads: int = 0
+
+
+@contextlib.asynccontextmanager
+async def _loop_lag() -> AsyncIterator[_LoopLag]:
+    """How late a 5 ms timer fires while the body runs, and the most threads alive.
+
+    The measure of a free event loop: a call that holds the GIL or blocks the
+    loop delays the timer by as long as it holds it.
+    """
+    lag = _LoopLag()
+    done = False
+    ticking = asyncio.Event()
+
+    async def tick() -> None:
+        last = time.perf_counter()
+        ticking.set()
+        while not done:
+            await asyncio.sleep(0.005)
+            now = time.perf_counter()
+            lag.longest = max(lag.longest, now - last - 0.005)
+            lag.most_threads = max(lag.most_threads, threading.active_count())
+            last = now
+
+    ticker = asyncio.ensure_future(tick())
+    # The body starts only once the timer has its first reading. Work that takes
+    # the GIL at once would otherwise run before the timer starts, and show no lag.
+    await ticking.wait()
+    try:
+        yield lag
+    finally:
+        done = True
+        await ticker
+
+
+def _deeply_nested_der(depth: int = 2000) -> bytes:
+    """SEQUENCEs nested `depth` deep. asyncssh's DER decoder recurses once a level."""
+    body = b""
+    for _ in range(depth):
+        size = len(body).to_bytes((len(body).bit_length() + 7) // 8 or 1, "big")
+        length = size if len(body) < 0x80 else bytes([0x80 | len(size)]) + size
+        body = b"\x30" + length + body
+    return body
+
+
+def _storing():
+    """The repository and the side effects of storing a secret, patched out.
+
+    The second patch is the repository's `create`, which a test asserts on.
+    """
+    module = "app.services.organization_secret"
+    return (
+        patch(f"{module}.organization_secret_repo.get_by_name", new=AsyncMock(return_value=None)),
+        patch(
+            f"{module}.organization_secret_repo.create",
+            new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+        ),
+        patch(f"{module}.record_audit", new=AsyncMock()),
+        patch(f"{module}.NotificationService", new=MagicMock(return_value=AsyncMock())),
+    )
+
+
+async def _refusal_when_stored(private_key: str, passphrase: str | None) -> tuple[str, bool]:
+    """What the refusal to store this key shows, and whether it drops the parser's exception.
+
+    Storing a login is two checks: the parse refuses what it can tell without
+    decrypting, and the service refuses a key that does not open. The test
+    reads whichever refused, through the path the vault form takes.
+    """
+    value = {
+        "kind": "ssh_credentials",
+        "username": "partner-sync",
+        "host": "sftp.example.com",
+        "private_key": private_key,
+        **({} if passphrase is None else {"passphrase": passphrase}),
+    }
+    try:
+        body = SecretCreate.model_validate(
+            {"name": "Partner drop", "purpose": "sftp", "value": value}
+        )
+    except ValidationError as exc:
+        refused = pytest.ExceptionInfo.from_exc_info((type(exc), exc, exc.__traceback__))
+        return _what_a_refusal_shows(refused), _chained_from_none(refused)
+    by_name, create, audit, notifications = _storing()
+    with by_name, create as created, audit, notifications:
+        try:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name=body.name, value=body.value, purpose=body.purpose
+            )
+        except BadRequestError as exc:
+            created.assert_not_awaited()
+            rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            shown = "\n".join([exc.message, str(exc.details), rendered])
+            return shown, exc.__cause__ is None and exc.__context__ is None
+    pytest.fail("The key was stored")
 
 
 class TestSshCredentials:
@@ -469,30 +805,48 @@ class TestSshCredentials:
         assert "Missing PEM footer" not in shown
         assert _chained_from_none(refused)
 
+    @pytest.mark.anyio
     @pytest.mark.parametrize("form", ["openssh-encrypted", "pkcs8-encrypted", "pkcs1-encrypted"])
-    def test_a_wrong_passphrase_is_refused_without_echoing_the_key(self, form: str):
+    async def test_a_wrong_passphrase_is_refused_without_echoing_the_key(self, form: str):
         """asyncssh answers a wrong passphrase with a different exception for each
         format. Each one gets the same sentence, and neither the key nor the
         passphrase that was typed is shown.
 
-        The passphrase is the last field, so pydantic's `input_value` would show
-        it whole in `str()` and `repr()` of the error. `hide_input_in_errors`
-        closes that path, and `from None` drops the chained asyncssh exception.
+        Only decrypting the key shows that the passphrase is wrong, so the parse
+        accepts the login and the service refuses it when it stores it. The
+        refusal names the passphrase field, for the form to mark, and carries no
+        exception of the parser's, chained or as context.
         """
         key = _key_text(form)
+        login = _ssh_login(private_key=key, passphrase=WRONG_PASSPHRASE)
 
-        with pytest.raises(ValidationError) as refused:
-            _ssh_login(private_key=key, passphrase=WRONG_PASSPHRASE)
+        by_name, create, audit, notifications = _storing()
+        with (
+            by_name,
+            create as created,
+            audit,
+            notifications,
+            pytest.raises(BadRequestError) as refused,
+        ):
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
 
-        shown = _what_a_refusal_shows(refused)
-        assert "input_value" not in str(refused.value)
-        assert "The private key could not be read with this passphrase" in shown
+        sentence = "The private key could not be read with this passphrase."
+        exc = refused.value
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        shown = "\n".join([exc.message, str(exc.details), rendered])
+        assert exc.message == sentence
+        assert exc.details == {"fields": [{"field": "value.passphrase", "message": sentence}]}
         assert not _echoes(shown, key)
         assert not _echoes(shown, WRONG_PASSPHRASE, 8)
         assert "Incorrect passphrase" not in shown
         assert "Unable to decrypt" not in shown
-        assert _chained_from_none(refused)
+        assert exc.__cause__ is None
+        assert exc.__context__ is None
+        created.assert_not_awaited()
 
+    @pytest.mark.anyio
     @pytest.mark.parametrize(
         ("paste", "passphrase", "sentence", "foreign"),
         [
@@ -512,32 +866,338 @@ class TestSshCredentials:
                 ["codec", "utf-8", "decode", "invalid start byte"],
                 id="encrypted-pkcs8-first-line-lost",
             ),
+            pytest.param(
+                _pkcs1_key_with_a_negative_number,
+                None,
+                "Paste the whole key file",
+                ["can't convert", "negative int", "unsigned"],
+                id="pkcs1-with-a-negative-number",
+            ),
+            pytest.param(
+                lambda: _pem("PRIVATE KEY", _deeply_nested_der()),
+                None,
+                "Paste the whole key file",
+                ["recursion", "Recursion"],
+                id="pkcs8-nested-too-deep",
+            ),
+            pytest.param(
+                lambda: _pem("ENCRYPTED PRIVATE KEY", _deeply_nested_der()),
+                PASSPHRASE,
+                "could not be read with this passphrase",
+                ["recursion", "Recursion"],
+                id="encrypted-pkcs8-nested-too-deep",
+            ),
+            pytest.param(
+                # asyncssh compiles the label into its footer pattern, unescaped.
+                lambda: "-----BEGIN [ PRIVATE KEY-----\nAAAA\n-----END [ PRIVATE KEY-----\n",
+                None,
+                "Paste the whole key file",
+                ["character range", "unterminated", "position"],
+                id="label-that-is-no-pattern",
+            ),
         ],
     )
-    def test_a_damaged_key_that_the_parser_refuses_in_its_own_words_gets_our_sentence(
+    async def test_a_damaged_key_that_the_parser_refuses_in_its_own_words_gets_our_sentence(
         self, paste, passphrase: str | None, sentence: str, foreign: list[str]
     ):
         """asyncssh does not wrap every parse failure. A changed character in a
-        PKCS#1 key reaches cryptography's `ValueError`, and an encrypted PKCS#8
-        key without its first line a `UnicodeDecodeError`. Both are `ValueError`,
-        as asyncssh's own two classes are. The refusal is still our sentence,
-        and their text is not shown."""
+        PKCS#1 key reaches cryptography's `ValueError`, an encrypted PKCS#8 key
+        without its first line a `UnicodeDecodeError`, a negative number in an
+        RSA key cryptography's `OverflowError`, a body nested too deep the DER
+        decoder's `RecursionError`, and a label with a bracket the `re.error`
+        of the footer pattern asyncssh builds from it. The last three are not
+        `ValueError`, and fuzzing the parsers found no other type
+        (`KEY_PARSE_ERRORS`). The refusal is still our sentence, wherever the
+        paste is refused, and their text is not shown."""
         text = paste()
-        with pytest.raises(ValueError) as parsed:
+        with pytest.raises(KEY_PARSE_ERRORS) as parsed:
             asyncssh.import_private_key(text, passphrase)
         # The case is here for the error asyncssh does not wrap. If asyncssh
         # starts to wrap it, this case tests nothing new: choose another paste.
         assert not isinstance(parsed.value, asyncssh.KeyImportError | asyncssh.KeyEncryptionError)
 
-        with pytest.raises(ValidationError) as refused:
-            _ssh_login(private_key=text, passphrase=passphrase)
+        shown, unchained = await _refusal_when_stored(text, passphrase)
 
-        shown = _what_a_refusal_shows(refused)
-        assert "input_value" not in str(refused.value)
+        assert "input_value" not in shown
         assert sentence in shown
         assert not [words for words in foreign if words in shown]
         assert not _echoes(shown, text)
-        assert _chained_from_none(refused)
+        assert unchained
+
+    @pytest.mark.parametrize(
+        "paste",
+        [
+            pytest.param(lambda: _openssh_key_with(rounds=2**20), id="openssh-2**20-rounds"),
+            pytest.param(lambda: _openssh_key_with(rounds=2**32 - 1), id="openssh-most-rounds"),
+            pytest.param(
+                lambda: _openssh_key_with(rounds=MAX_KEY_ROUNDS + 1), id="openssh-one-round-over"
+            ),
+            pytest.param(lambda: _pkcs8_key_with_iterations(2**31), id="pkcs8-pbes2-2**31"),
+            pytest.param(
+                lambda: _pkcs8_key_with_iterations(MAX_KEY_ITERATIONS + 1),
+                id="pkcs8-pbes2-one-over",
+            ),
+            pytest.param(
+                # Past what a C long holds: `hashlib` would raise `OverflowError`.
+                lambda: _pkcs8_key_with_iterations(2**64, pbe_version=1),
+                id="pkcs8-pbes1-2**64",
+            ),
+            pytest.param(
+                # Each number within its ceiling, but PBKDF2 runs the count once
+                # per block of the key length: about 46 minutes of work.
+                lambda: _pkcs8_key_with_iterations(1_000_000, key_length=1_000_000),
+                id="pkcs8-pbkdf2-key-length-1000000",
+            ),
+            pytest.param(
+                lambda: _pkcs8_key_with_iterations(2048, key_length=MAX_PBKDF2_KEY_BYTES + 1),
+                id="pkcs8-pbkdf2-key-length-one-over",
+            ),
+        ],
+    )
+    def test_a_key_that_asks_for_too_much_work_is_refused_before_it_is_decrypted(self, paste):
+        """An encrypted key names its own key derivation cost, and the cost is
+        paid in full before a wrong passphrase shows: about 5 ms a bcrypt round.
+        The parse runs on the API's event loop, before any permission check. So
+        it reads the cost from the key's header and refuses one over the
+        ceiling, and the refusal takes no longer for 2**20 rounds, an hour and
+        a half of decrypting, than for one round over."""
+        text = paste()
+        started = time.perf_counter()
+
+        with pytest.raises(ValidationError, match="too many key derivation rounds") as refused:
+            _ssh_login(private_key=text, passphrase=WRONG_PASSPHRASE)
+
+        assert time.perf_counter() - started < 1.0
+        assert not _echoes(_what_a_refusal_shows(refused), text)
+
+    def test_a_key_at_the_ceiling_is_read(self):
+        """`ssh-keygen -a 100` is common advice, and `-a 16` its default. Both are
+        under the ceiling, and a key exactly at it is still taken."""
+        _ssh_login(private_key=_openssh_key_with(rounds=MAX_KEY_ROUNDS), passphrase=PASSPHRASE)
+        _ssh_login(
+            private_key=_pkcs8_key_with_iterations(MAX_KEY_ITERATIONS), passphrase=PASSPHRASE
+        )
+        _ssh_login(
+            private_key=_pkcs8_key_with_iterations(2048, key_length=MAX_PBKDF2_KEY_BYTES),
+            passphrase=PASSPHRASE,
+        )
+
+    def test_a_pkcs8_key_under_a_pem_encryption_header_is_refused(self):
+        """With a PEM encryption header, asyncssh decrypts the body with the
+        passphrase first and reads the iteration count out of what it decrypted,
+        which the parse cannot see without decrypting. No tool writes such a
+        key, so it is refused as unreadable."""
+        text = _pem(
+            "ENCRYPTED PRIVATE KEY",
+            _pem_body(_pkcs8_key_with_iterations(2048)),
+            headers="Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF",
+        )
+
+        with pytest.raises(ValidationError, match="could not be read with this passphrase"):
+            _ssh_login(private_key=text, passphrase=PASSPHRASE)
+
+    @pytest.mark.parametrize(
+        "paste",
+        [
+            pytest.param(
+                "-----BEGIN FOO PRIVATE KEY-----\nAAAA\n-----END FOO PRIVATE KEY-----\n",
+                id="unknown-block",
+            ),
+            pytest.param(
+                # asyncssh builds its footer pattern out of the label, unescaped.
+                "-----BEGIN [ PRIVATE KEY-----\nAAAA\n-----END [ PRIVATE KEY-----\n",
+                id="label-that-is-no-pattern",
+            ),
+            pytest.param(
+                # A whole encrypted key, but for its first bytes.
+                lambda: _pem(
+                    "OPENSSH PRIVATE KEY",
+                    b"openssh-key-v0\0"
+                    + _pem_body(_key_text("openssh-encrypted"))[len(_OPENSSH_MAGIC) :],
+                ),
+                id="openssh-block-without-its-magic",
+            ),
+            pytest.param("0\x00" + "-" * 10, id="der"),
+            pytest.param(lambda: "0\x00\n" + _key_text("openssh"), id="der-before-a-key"),
+            pytest.param(lambda: _key_text("openssh") + "é", id="not-ascii"),
+        ],
+    )
+    @pytest.mark.parametrize("passphrase", [None, PASSPHRASE])
+    def test_a_paste_asyncssh_would_not_read_as_a_private_key_is_refused(
+        self, paste, passphrase: str | None
+    ):
+        """The parse reads the block asyncssh would decrypt, with asyncssh's own
+        block finder. A block of another name, an OpenSSH block that is not an
+        OpenSSH key, binary DER - which asyncssh reads first when a paste starts
+        with one - and a character past ASCII are no private key it reads, with
+        a passphrase or without one."""
+        text = paste() if callable(paste) else paste
+
+        with pytest.raises(ValidationError, match="The private key could not be read"):
+            _ssh_login(private_key=text, passphrase=passphrase)
+
+    @pytest.mark.parametrize("form", ["sequence", "oid"])
+    @pytest.mark.parametrize("parse", [SecretCreate, SecretUpdate], ids=["create", "update"])
+    def test_a_paste_too_long_to_decode_is_refused_before_anything_reads_it(self, parse, form: str):
+        """The header check decodes an encrypted key's DER, and the decoder is
+        quadratic: these pastes held the event loop for 15 s and 8.5 s, before
+        any permission check. The length limit refuses them before the model
+        validator runs, with the field named and nothing of the paste shown."""
+        paste = _quadratic_der_paste(form)
+        body = {
+            "name": "Partner drop",
+            "value": {
+                "kind": "ssh_credentials",
+                "username": "partner-sync",
+                "host": "sftp.example.com",
+                "private_key": paste,
+                "passphrase": PASSPHRASE,
+            },
+        }
+        started = time.perf_counter()
+
+        with pytest.raises(ValidationError) as refused:
+            parse.model_validate_json(json.dumps(body))
+
+        assert time.perf_counter() - started < 0.5
+        [error] = refused.value.errors()
+        assert error["loc"][-1] == "private_key"
+        assert error["msg"] == (
+            "The private key is too long. Paste only the key file, at most 16,384 characters."
+        )
+        assert not _echoes(_what_a_refusal_shows(refused), paste)
+
+    @pytest.mark.parametrize(
+        ("field", "sentence"),
+        [
+            ("password", "The password is too long: at most 1,024 characters."),
+            ("passphrase", "The passphrase is too long: at most 1,024 characters."),
+        ],
+    )
+    def test_a_password_or_passphrase_is_at_most_1024_characters(self, field: str, sentence: str):
+        """Both reach the child process's stdin, and the passphrase the key
+        derivation, which reads it whole. The refusal is ours, on the field, and
+        does not show the value."""
+        key = {} if field == "password" else {"private_key": _key_text("openssh")}
+        value = "Sentinel-9" * (MAX_PASSWORD_CHARACTERS // 10 + 1)
+
+        _ssh_login(**key, **{field: "x" * MAX_PASSWORD_CHARACTERS})
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(**key, **{field: value})
+
+        [error] = refused.value.errors()
+        assert (error["loc"], error["msg"]) == ((field,), sentence)
+        assert "Sentinel-9" not in _what_a_refusal_shows(refused)
+
+    def test_a_private_key_over_the_limit_is_refused_in_our_words(self):
+        """One character over the limit, refused on the field, without the key."""
+        # The label is split so the repository's private-key hook does not read
+        # this made-up paste as a committed key.
+        label = "OPENSSH " + "PRIVATE KEY"
+        paste = f"-----BEGIN {label}-----\n" + "Q" * MAX_PRIVATE_KEY_CHARACTERS
+
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(private_key=paste)
+
+        [error] = refused.value.errors()
+        assert (error["loc"], error["msg"]) == (
+            ("private_key",),
+            "The private key is too long. Paste only the key file, at most 16,384 characters.",
+        )
+        assert "QQQQQQQQ" not in _what_a_refusal_shows(refused)
+
+    def test_a_41638_bit_rsa_key_is_refused_by_its_length_before_it_is_opened(self):
+        """Validated, this key held an event loop for seven minutes. Its paste is
+        about 31,700 characters, so no child process starts for it."""
+        with pytest.raises(ValidationError, match="The private key is too long"):
+            _ssh_login(private_key=_mersenne_rsa_key(19937, 21701))
+
+    def test_an_rsa_4096_key_in_each_form_is_within_the_length_limit(self):
+        """The largest key a login may hold, in each form asyncssh reads,
+        encrypted, is well under the limit, and is taken."""
+        key = _rsa_4096()
+        for form in ("openssh", "pkcs8-pem", "pkcs1-pem"):
+            text = key.export_private_key(form, PASSPHRASE).decode()
+
+            assert len(text) < MAX_PRIVATE_KEY_CHARACTERS / 3
+            _ssh_login(private_key=text, passphrase=PASSPHRASE)
+
+    @pytest.mark.parametrize(
+        ("fields", "location", "sentence"),
+        [
+            pytest.param(
+                {"private_key": lambda: _key_text("openssh-encrypted")},
+                "private_key",
+                "The private key could not be read. Paste the whole key file, and give its "
+                "passphrase if it has one.",
+                id="encrypted-without-its-passphrase",
+            ),
+            pytest.param(
+                {"private_key": lambda: "not a key at all", "passphrase": lambda: PASSPHRASE},
+                "passphrase",
+                "The private key could not be read with this passphrase.",
+                id="unreadable-with-a-passphrase",
+            ),
+            pytest.param(
+                {
+                    "private_key": lambda: _openssh_key_with(rounds=MAX_KEY_ROUNDS + 1),
+                    "passphrase": lambda: PASSPHRASE,
+                },
+                "private_key",
+                "The private key is encrypted with too many key derivation rounds. Encrypt it "
+                "again with fewer, e.g. with ssh-keygen -p -a 16 -f <key file>.",
+                id="too-many-rounds",
+            ),
+            pytest.param(
+                {"password": lambda: PASSWORD, "passphrase": lambda: PASSPHRASE},
+                "passphrase",
+                "A passphrase goes with a private key.",
+                id="passphrase-beside-a-password",
+            ),
+        ],
+    )
+    def test_each_cheap_key_refusal_is_located_at_its_field(
+        self, fields: dict, location: str, sentence: str
+    ):
+        """Located at the field, the form marks the input it is about and shows
+        the sentence as written, as it does for the same mistake the child
+        process finds. No value travels with it."""
+        with pytest.raises(ValidationError) as refused:
+            _ssh_login(**{name: make() for name, make in fields.items()})
+
+        [error] = refused.value.errors()
+        assert (error["loc"], error["msg"], error["input"]) == ((location,), sentence, None)
+
+    def test_a_label_that_makes_the_footer_pattern_backtrack_is_refused_fast(self):
+        """asyncssh finds a block's footer with a pattern built from its BEGIN
+        line, unescaped. `(a+)+` there backtracks twice as long for each `a` in
+        a footer that does not match: 28 of them hold the event loop for
+        seconds, 40 for hours. The label is checked before the pattern is built."""
+        text = "-----BEGIN (a+)+ PRIVATE KEY-----\nAAAA\n-----END " + "a" * 28 + "X\n"
+        started = time.perf_counter()
+
+        with pytest.raises(ValidationError, match="Paste the whole key file"):
+            _ssh_login(private_key=text)
+
+        assert time.perf_counter() - started < 1.0
+
+    def test_an_openssh_key_with_another_key_derivation_is_left_to_the_decrypt(self):
+        """asyncssh refuses an encrypted OpenSSH key whose key derivation is not
+        bcrypt before it derives anything. The parse reads the rounds in its
+        options all the same, whichever derivation is named, and refuses it
+        without a passphrase, as any encrypted key. With one, the parse takes it
+        and decrypting it refuses it."""
+        text = _openssh_key_with(kdf=b"scrypt")
+
+        with pytest.raises(ValidationError, match="give its passphrase if it has one"):
+            _ssh_login(private_key=text)
+        with pytest.raises(ValidationError, match="too many key derivation rounds"):
+            _ssh_login(
+                private_key=_openssh_key_with(kdf=b"scrypt", rounds=2**20), passphrase=PASSPHRASE
+            )
+        _ssh_login(private_key=text, passphrase=PASSPHRASE)
+
+        assert inspect(text, PASSPHRASE).opens is False
 
     def test_a_short_passphrase_opens_an_encrypted_key(self):
         """`ssh-keygen` accepts a passphrase of five characters. The passphrase is
@@ -574,13 +1234,17 @@ class TestSshCredentials:
             pytest.param("sync\x00", id="nul"),
             pytest.param("sync\x1b[31m", id="escape"),
             pytest.param("sync\x7f", id="delete"),
+            pytest.param("sync\x80", id="c1-first"),
+            pytest.param("sync\x9b31m", id="c1-csi"),
+            pytest.param("sync\x9f", id="c1-last"),
             pytest.param("a" * 256, id="too-long"),
         ],
     )
     def test_a_user_name_with_whitespace_or_a_control_character_is_refused(self, username: str):
         """The user name goes into the login refusal, the sync log and log lines. A
-        line break or a control character there could forge a line. SSH user
-        names hold neither, and are at most 255 characters here."""
+        line break or a control character there could forge a line, and U+009B
+        starts a terminal escape as ESC [ does. SSH user names hold neither, and
+        are at most 255 characters here."""
         with pytest.raises(ValidationError):
             _ssh_login(username=username, password=PASSWORD)
 
@@ -600,15 +1264,80 @@ class TestSshCredentials:
             pytest.param("sftp example.com", id="space"),
             pytest.param("sftp.example.com\n", id="newline"),
             pytest.param("2001:db8::7", id="ipv6-without-brackets"),
+            pytest.param("[fe80::1%eth0]", id="ipv6-zone"),
+            pytest.param("*.example.com", id="wildcard"),
+            pytest.param("sftp.example.com..", id="two-trailing-dots"),
+            pytest.param(":2222", id="port-without-a-host"),
+            pytest.param("sftp.example.com:0", id="port-zero"),
+            pytest.param("sftp.example.com:65536", id="port-too-high"),
+            pytest.param("-sftp.example.com", id="label-starting-with-a-hyphen"),
         ],
     )
     def test_an_ssh_login_s_host_is_one_host_and_an_optional_port(self, host: str):
         """The host binds the login. A URL, a path or a user in it could never
         match the host a source dials, so the login would be refused at every
         sync. An IPv6 address needs its brackets, or its last group reads as a
-        port."""
-        with pytest.raises(ValidationError):
+        port. Port 0 cannot be dialled."""
+        with pytest.raises(ValidationError) as refused:
             _ssh_login(host=host, password=PASSWORD)
+
+        if host:
+            assert "An IPv6 address goes in brackets" in str(refused.value)
+
+    @pytest.mark.parametrize(
+        ("typed", "stored"),
+        [
+            pytest.param("[2001:DB8:0:0::7]", "[2001:db8::7]", id="ipv6-compressed"),
+            pytest.param("[2001:db8:0::7]:2222", "[2001:db8::7]:2222", id="ipv6-with-port"),
+            pytest.param("SFTP.Example.com.", "sftp.example.com", id="case-and-trailing-dot"),
+            pytest.param("sftp.example.com.:2222", "sftp.example.com:2222", id="dot-and-port"),
+            pytest.param("bücher.example", "xn--bcher-kva.example", id="idna"),
+            pytest.param("sftp.example.com:022", "sftp.example.com:22", id="port-leading-zero"),
+            pytest.param("10.0.0.5:2222", "10.0.0.5:2222", id="ipv4-with-port"),
+            # DNS and Docker resolve a name with an underscore, such as a
+            # Compose service's.
+            pytest.param("SFTP_Server:2222", "sftp_server:2222", id="underscore"),
+        ],
+    )
+    def test_an_ssh_login_s_host_is_stored_as_a_source_spells_it(self, typed: str, stored: str):
+        """`allows` compares the bound host with the source's host as strings, and
+        `SftpConfig` spells the source's host in one way. A login bound to the
+        same host in another spelling would be accepted here and refused at the
+        first sync, so the host is stored in the source's spelling. A Git
+        token's host keeps what was typed: its binding did not change."""
+        assert _ssh_login(host=typed, password=PASSWORD).host == stored
+        if typed.isascii() and "_" not in typed:
+            git = secret_kinds.GitTokenSecret(token="ghp_" + "x" * 20, host=typed)
+            assert git.host == typed
+
+    def test_a_git_token_s_host_still_takes_no_underscore(self):
+        """The SSH login takes `sftp_server`; the Git token's host rule did not
+        change with it."""
+        with pytest.raises(ValidationError, match="should match pattern"):
+            secret_kinds.GitTokenSecret(token="ghp_" + "x" * 20, host="git_server")
+
+    def test_a_long_internationalized_bound_host_still_opens_after_it_is_stored(self):
+        """The host is stored IDNA-encoded, which is longer than the Unicode it was
+        typed in, and the vault parses the stored host again each time it opens
+        the login. A name of up to 253 encoded characters, and its port, opens;
+        one longer is refused when it is typed, not when the vault opens it."""
+        label = "bücher" + "a" * 45
+        host = ".".join([label] * 4) + ".exaaaaaaample:2222"
+        scope = VaultScope.organization(uuid.uuid4())
+        login = _ssh_login(host=host, password=PASSWORD)
+
+        opened = unseal_secret(
+            seal_secret(login, scope=scope).ciphertext,
+            kind=secret_kinds.SecretKind.SSH_CREDENTIALS,
+            scope=scope,
+        )
+
+        assert len(login.host) > 253
+        assert opened == login
+        # 220 characters typed, 254 encoded.
+        over = ".".join([label] * 4) + "." + "ü" * 12
+        with pytest.raises(ValidationError, match="An IPv6 address goes in brackets"):
+            _ssh_login(host=over + ":2222", password=PASSWORD)
 
     def test_an_ssh_login_is_hinted_by_its_user_name(self):
         """The user name says which login it is, and it is not secret, as an AWS
@@ -632,6 +1361,64 @@ class TestSshCredentials:
             for surface in (repr(login), str(login), str(login.model_dump())):
                 assert not [value for value in hidden if _echoes(surface, value, 8)]
         assert "partner-sync" in repr(by_password)
+
+    @pytest.mark.parametrize(
+        "parse",
+        [
+            pytest.param(
+                lambda value: SecretCreate.model_validate({"name": "n", "value": value}),
+                id="secret-create",
+            ),
+            pytest.param(
+                lambda value: SecretCreate.model_validate_json(
+                    json.dumps({"name": "n", "value": value})
+                ),
+                id="secret-create-json",
+            ),
+            pytest.param(
+                lambda value: SecretUpdate.model_validate({"value": value}), id="secret-update"
+            ),
+            pytest.param(secret_kinds._STORABLE_ADAPTER.validate_python, id="vault-adapter"),
+            pytest.param(
+                lambda value: secret_kinds._STORABLE_ADAPTER.validate_json(json.dumps(value)),
+                id="vault-adapter-json",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param(
+                {"private_key": "PRIVATE-KEY-SENTINEL", "password": "PASSWORD-SENTINEL"},
+                id="key-and-password",
+            ),
+            pytest.param(
+                {"password": "PASSWORD-SENTINEL", "passphrase": "PASSPHRASE-SENTINEL"},
+                id="passphrase-beside-a-password",
+            ),
+            pytest.param(
+                {"private_key": "PRIVATE-KEY-SENTINEL", "passphrase": "PASSPHRASE-SENTINEL"},
+                id="unreadable-key-and-its-passphrase",
+            ),
+            pytest.param({"password": "SENTNL!"}, id="password-too-short"),
+        ],
+    )
+    def test_a_refused_login_is_not_repeated_in_the_error_on_any_path_that_parses_it(
+        self, parse, fields: dict[str, str]
+    ):
+        """`hide_input_in_errors` is read from the outermost schema only. The vault
+        form posts a `SecretCreate` or a `SecretUpdate`, and the vault opens a
+        stored login through its adapter, so each of them sets it: a refused
+        login's key, passphrase and password stay out of `str()` and `repr()` of
+        the error, which is what reaches a log line."""
+        value = {"kind": "ssh_credentials", "username": "sync", "host": "h.example", **fields}
+
+        with pytest.raises(ValidationError) as refused:
+            parse(value)
+
+        for surface in (str(refused.value), repr(refused.value)):
+            assert "SENTINEL" not in surface
+            assert "SENTNL!" not in surface
 
     def test_an_ssh_login_survives_the_envelope_whole(self):
         """The vault seals the login as JSON, and the key check runs again when it
@@ -668,6 +1455,12 @@ class TestSshCredentials:
             ("[2001:db8::7]:2222", "2001:db8::7", 2222, True),
             ("[2001:db8::7]", "2001:db8::8", 22, False),
             ("xn--bcher-kva.example", "xn--bcher-kva.example", 22, True),
+            # Bound in another spelling of the same host. SftpConfig compresses an
+            # IPv6 address, takes no trailing dot and IDNA-encodes a name.
+            ("[2001:DB8:0:0::7]", "2001:db8::7", 22, True),
+            ("sftp.example.com.", "sftp.example.com", 22, True),
+            ("bücher.example", "xn--bcher-kva.example", 22, True),
+            ("sftp_server:2222", "sftp_server", 2222, True),
         ],
     )
     def test_an_ssh_login_allows_only_its_host_and_port_with_22_by_default(
@@ -699,6 +1492,453 @@ class TestSshCredentials:
         assert masked("passphrase")
         assert masked("password")
         assert "x-textarea" not in properties["password"]
+
+
+class TestOpeningAnSshKeyWhenItIsStored:
+    """Opening a key costs what the key asks for: its key derivation, and for RSA a
+    validation that grows about as the cube of the modulus, with the GIL held. So
+    the service opens it in a child process with a time limit, after the caller
+    was authorized, and awaits it without holding a thread or the event loop."""
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("encrypted", [False, True], ids=["plain", "encrypted"])
+    @pytest.mark.parametrize("algorithm", ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-4096"])
+    async def test_a_key_that_opens_is_stored(self, algorithm: str, encrypted: bool):
+        key = _rsa_4096() if algorithm == "rsa-4096" else _ssh_key(algorithm)
+        passphrase = PASSPHRASE if encrypted else None
+        text = key.export_private_key(
+            "openssh", passphrase, rounds=16, ignore_few_rounds=True
+        ).decode()
+        login = _ssh_login(username="partner-sync", private_key=text, passphrase=passphrase)
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create as created, audit, notifications:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
+
+        stored = created.call_args.kwargs
+        assert (stored["kind"], stored["hint"]) == ("ssh_credentials", "sync")
+        assert PASSPHRASE not in stored["sealed_secret"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("form", ["openssh-encrypted", "pkcs8-encrypted", "pkcs1-encrypted"])
+    async def test_an_encrypted_key_of_each_form_is_stored(self, form: str):
+        login = _ssh_login(private_key=_key_text(form), passphrase=PASSPHRASE)
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create as created, audit, notifications:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
+
+        created.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_a_rotation_to_a_key_that_does_not_open_is_refused(self):
+        ctx = _ctx()
+        row = _row(ctx, _ssh_login(password=PASSWORD))
+        rotated = _ssh_login(
+            private_key=_key_text("openssh-encrypted"), passphrase=WRONG_PASSPHRASE
+        )
+
+        with (
+            patch(
+                "app.services.organization_secret.organization_secret_repo.get",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "app.services.organization_secret.organization_secret_repo.update", new=AsyncMock()
+            ) as update,
+            pytest.raises(BadRequestError) as refused,
+        ):
+            await OrganizationSecretService(_db()).update(ctx, row.id, value=rotated)
+
+        assert refused.value.details["fields"][0]["field"] == "value.passphrase"
+        assert refused.value.message == "The private key could not be read with this passphrase."
+        update.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_a_key_without_a_passphrase_that_does_not_open_names_the_key(self):
+        login = _ssh_login(private_key=_one_character_changed(_key_text("pkcs1"), line=10))
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create, audit, notifications, pytest.raises(BadRequestError) as refused:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
+
+        assert refused.value.details["fields"][0]["field"] == "value.private_key"
+        assert "Paste the whole key file" in refused.value.message
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("p", "q"),
+        [
+            pytest.param(2203, 2281, id="4484-bits"),
+            # Validated, this key took 5.4 s.
+            pytest.param(4423, 4253, id="8676-bits"),
+        ],
+    )
+    async def test_an_rsa_key_over_4096_bits_is_refused_without_being_validated(
+        self, p: int, q: int
+    ):
+        """A valid RSA key of any size can be built from two known primes, and its
+        validation grows about as the cube of the size. The child reports the
+        size before it validates anything, so the refusal takes no longer for
+        8,676 bits than for 4,484. A larger key's paste is over the length limit,
+        and the parse refuses it first."""
+        login = _ssh_login(private_key=_mersenne_rsa_key(p, q))
+        started = time.perf_counter()
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create, audit, notifications, pytest.raises(BadRequestError) as refused:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
+
+        assert time.perf_counter() - started < organization_secret.KEY_CHECK_SECONDS
+        sentence = (
+            "The private key is an RSA key of more than 4096 bits. Use an Ed25519 key, "
+            "or an RSA key of at most 4096 bits."
+        )
+        assert refused.value.details == {
+            "fields": [{"field": "value.private_key", "message": sentence}]
+        }
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("paste", "passphrase", "field", "sentence"),
+        [
+            pytest.param(
+                _rsa_key_with_a_prime_of_one,
+                None,
+                "value.private_key",
+                "The private key could not be read. Paste the whole key file, and give its "
+                "passphrase if it has one.",
+                id="prime-of-one",
+            ),
+            pytest.param(
+                lambda: _rsa_key_with_a_prime_of_one(PASSPHRASE),
+                PASSPHRASE,
+                "value.passphrase",
+                "The private key could not be read with this passphrase.",
+                id="prime-of-one-encrypted",
+            ),
+            pytest.param(
+                lambda: _rsa_key_with_a_crt_exponent_off_by_two(),
+                None,
+                "value.private_key",
+                "The private key could not be read. Paste the whole key file, and give its "
+                "passphrase if it has one.",
+                id="crt-exponent-wrong",
+            ),
+            pytest.param(
+                lambda: _mersenne_rsa_key(3217, 521),
+                None,
+                "value.private_key",
+                "The private key is an RSA key whose two primes are not of the same size. "
+                "Use an Ed25519 key, or an RSA key that ssh-keygen made.",
+                id="unbalanced-primes",
+            ),
+            pytest.param(
+                _security_key_private_key,
+                None,
+                "value.private_key",
+                "The private key is held on a security key, which a sync cannot use to log "
+                "in. Use an Ed25519 key without a security key.",
+                id="security-key",
+            ),
+        ],
+    )
+    async def test_a_key_the_worker_cannot_use_or_that_costs_too_much_is_refused(
+        self, paste, passphrase: str | None, field: str, sentence: str
+    ):
+        """A prime of 1 ends asyncssh's decoder in a `ZeroDivisionError`: a bad
+        paste, not a server fault. Primes of very different sizes make a valid
+        key that takes seconds to validate at each connection. A security key's
+        file holds a handle for a device the worker does not have."""
+        login = _ssh_login(private_key=paste(), passphrase=passphrase)
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create, audit, notifications, pytest.raises(BadRequestError) as refused:
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=login, purpose="sftp"
+            )
+
+        assert refused.value.details == {"fields": [{"field": field, "message": sentence}]}
+
+    @pytest.mark.anyio
+    async def test_the_key_is_opened_in_a_child_that_holds_no_thread_and_no_loop_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The key and its passphrase reach the child on stdin, never in its
+        arguments or its environment, which other processes on the host can
+        read. The child is Python in isolated mode, running the key check module
+        alone. While it opens an RSA key of 8,676 bits, which opened in-process
+        held the GIL and the event loop for 5.4 s, the loop keeps running and no
+        thread is started."""
+        login = _ssh_login(private_key=_mersenne_rsa_key(4423, 4253))
+        spawned: list[tuple[tuple[str, ...], dict]] = []
+        spawn = asyncio.create_subprocess_exec
+
+        async def recording(*command: str, **options: object):
+            spawned.append((command, options))
+            return await spawn(*command, **options)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+        threads = threading.active_count()
+        refused: BadRequestError | None = None
+        by_name, create, audit, notifications = _storing()
+        with by_name, create, audit, notifications:
+            async with _loop_lag() as lag:
+                try:
+                    await OrganizationSecretService(_db()).create(
+                        _ctx(), name="Partner drop", value=login, purpose="sftp"
+                    )
+                except BadRequestError as exc:
+                    refused = exc
+
+        # The stall this guards against was 5.4 s for this key, and more for a
+        # larger one, so 1 s still tells the two apart on a loaded runner.
+        assert lag.longest < 1.0
+        assert lag.most_threads <= threads
+        [(command, options)] = spawned
+        assert command == (sys.executable, "-I", "-m", "app.services.ssh_key_check")
+        assert options["env"] == {}
+        assert not [part for part in command if "PRIVATE" in part]
+        assert refused is not None
+        assert "RSA key of more than 4096 bits" in refused.message
+
+    @pytest.mark.anyio
+    async def test_a_child_that_stalls_is_killed_in_time_and_the_key_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A key that takes longer than the limit to open is refused, and its child
+        is killed and reaped: nothing keeps running after the answer. The loop is
+        free while it waits: a wait that blocked it would hold it for the whole
+        2 s limit."""
+        monkeypatch.setattr(organization_secret, "KEY_CHECK_SECONDS", 2.0)
+        monkeypatch.setattr(
+            organization_secret, "_KEY_CHECK_COMMAND", _child("import time; time.sleep(60)")
+        )
+        children = _recording_children(monkeypatch)
+        login = _ssh_login(private_key=_key_text("openssh"))
+        started = time.perf_counter()
+
+        by_name, create, audit, notifications = _storing()
+        with by_name, create, audit, notifications, pytest.raises(BadRequestError) as refused:
+            async with _loop_lag() as lag:
+                await OrganizationSecretService(_db()).create(
+                    _ctx(), name="Partner drop", value=login, purpose="sftp"
+                )
+
+        assert time.perf_counter() - started < 2.0 + 1.0
+        # A wait that blocked the loop would hold it 2 s; 1 s leaves room for a
+        # loaded runner and still tells the two apart.
+        assert lag.longest < 1.0
+        assert refused.value.message == (
+            "The private key takes too long to open. Use an Ed25519 key, or an RSA key "
+            "of at most 4096 bits."
+        )
+        assert refused.value.details["fields"][0]["field"] == "value.private_key"
+        assert not _alive(children[0].pid)
+
+    @pytest.mark.anyio
+    async def test_the_key_check_is_killed_when_the_key_outlasts_its_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The child is what bounds what a header cannot show. A PBKDF2 key length
+        multiplies the iterations; this key would take about seventeen seconds,
+        and the real check is stopped at its limit."""
+        monkeypatch.setattr(organization_secret, "KEY_CHECK_SECONDS", 1.0)
+        started = time.perf_counter()
+
+        report = await organization_secret._open_in_a_child(
+            _pkcs8_key_with_iterations(20_000, key_length=320_000), WRONG_PASSPHRASE
+        )
+
+        assert report is None
+        assert time.perf_counter() - started < 1.0 + 1.0
+
+    @pytest.mark.anyio
+    async def test_a_cancelled_request_leaves_no_child_behind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            organization_secret, "_KEY_CHECK_COMMAND", _child("import time; time.sleep(60)")
+        )
+        spawned = asyncio.Event()
+        children = _recording_children(monkeypatch, spawned)
+        task = asyncio.ensure_future(organization_secret._open_in_a_child("key", None))
+        await spawned.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not _alive(children[0].pid)
+
+    @pytest.mark.anyio
+    async def test_a_save_that_finds_both_slots_busy_is_refused_at_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Each check is a process, and a save already holds a database
+        connection. A save that waited for a slot would hold it all the while, so
+        a burst of saves would empty the pool for every other request. The third
+        save at once is refused without waiting, and starts no process."""
+        monkeypatch.setattr(
+            organization_secret, "_KEY_CHECK_COMMAND", _child("import time; time.sleep(60)")
+        )
+        both = asyncio.Event()
+        children = _recording_children(monkeypatch, both, count=2)
+        running = [
+            asyncio.ensure_future(organization_secret._open_in_a_child("key", None))
+            for _ in range(2)
+        ]
+        await both.wait()
+        login = _ssh_login(private_key=_key_text("openssh"))
+        started = time.perf_counter()
+
+        by_name, create, audit, notifications = _storing()
+        try:
+            with (
+                by_name,
+                create as created,
+                audit,
+                notifications,
+                pytest.raises(ExternalServiceError) as refused,
+            ):
+                # Bounded, so a save that waited for a slot fails here, not hangs.
+                await asyncio.wait_for(
+                    OrganizationSecretService(_db()).create(
+                        _ctx(), name="Partner drop", value=login, purpose="sftp"
+                    ),
+                    2.0,
+                )
+        finally:
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+
+        assert time.perf_counter() - started < 0.5
+        assert refused.value.status_code == 503
+        assert refused.value.code == "SERVICE_BUSY"
+        assert refused.value.message == (
+            "Other private keys are being checked now. Try again in a moment."
+        )
+        assert len(children) == 2
+        created.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_a_child_that_fails_without_a_report_is_an_internal_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """A child that dies says nothing about the key, so the key is not refused
+        as unreadable. Its exit status is logged, and nothing of the key."""
+        monkeypatch.setattr(
+            organization_secret, "_KEY_CHECK_COMMAND", _child("import sys; sys.exit(3)")
+        )
+        key = _key_text("openssh")
+
+        with pytest.raises(InternalError) as failed:
+            await organization_secret._open_in_a_child(key, PASSPHRASE)
+
+        assert failed.value.message == "The private key could not be checked. Try again later."
+        [record] = [entry for entry in caplog.records if entry.msg == "ssh_key_check_failed"]
+        assert record.returncode == 3
+        assert not _echoes(caplog.text, key)
+        assert PASSPHRASE not in caplog.text
+
+    @pytest.mark.anyio
+    async def test_a_caller_who_may_not_edit_the_secret_starts_no_child(self):
+        """`PATCH /secrets/{id}` has no gate: the service decides, on the row. A
+        caller it refuses must not get a key opened first."""
+        ctx = _ctx()
+        row = _row(ctx, _ssh_login(password=PASSWORD))
+        rotated = _ssh_login(
+            private_key=_key_text("openssh-encrypted"), passphrase=WRONG_PASSPHRASE
+        )
+
+        with (
+            patch(
+                "app.services.organization_secret.organization_secret_repo.get",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "app.services.organization_secret.resolve_access", new=AsyncMock(return_value=False)
+            ),
+            patch("app.services.organization_secret._open_in_a_child") as opened,
+            pytest.raises(NotFoundError),
+        ):
+            await OrganizationSecretService(_db()).update(ctx, row.id, value=rotated)
+
+        opened.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_a_login_without_a_key_starts_no_child(self):
+        by_name, create, audit, notifications = _storing()
+        with (
+            by_name,
+            create as created,
+            audit,
+            notifications,
+            patch("app.services.organization_secret._open_in_a_child") as opened,
+        ):
+            await OrganizationSecretService(_db()).create(
+                _ctx(), name="Partner drop", value=_ssh_login(password=PASSWORD), purpose="sftp"
+            )
+
+        opened.assert_not_called()
+        created.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("report", "passphrase", "refusal"),
+        [
+            pytest.param(None, None, "private_key", id="out-of-time"),
+            pytest.param(
+                KeyReport(opens=True, algorithm="ssh-rsa", rsa_bits=4097),
+                None,
+                "private_key",
+                id="rsa-4097",
+            ),
+            pytest.param(KeyReport(opens=False), None, "private_key", id="unreadable"),
+            pytest.param(KeyReport(opens=False), PASSPHRASE, "passphrase", id="wrong-passphrase"),
+            pytest.param(
+                KeyReport(opens=True, algorithm="ssh-rsa", rsa_bits=4096), None, None, id="rsa-4096"
+            ),
+            pytest.param(
+                KeyReport(opens=True, algorithm="ssh-ed25519"), PASSPHRASE, None, id="ed25519"
+            ),
+            pytest.param(
+                KeyReport(opens=True, algorithm="ssh-rsa", rsa_bits=4096, rsa_prime_gap=17),
+                None,
+                "private_key",
+                id="primes-17-bits-apart",
+            ),
+            pytest.param(
+                KeyReport(opens=True, algorithm="ssh-rsa", rsa_bits=4096, rsa_prime_gap=16),
+                None,
+                None,
+                id="primes-16-bits-apart",
+            ),
+            pytest.param(
+                KeyReport(opens=True, algorithm="sk-ecdsa-sha2-nistp256@openssh.com"),
+                None,
+                "private_key",
+                id="security-key",
+            ),
+        ],
+    )
+    def test_the_child_s_report_decides_the_refusal(
+        self, report: KeyReport | None, passphrase: str | None, refusal: str | None
+    ):
+        key = _key_text("openssh-encrypted") if passphrase else _key_text("openssh")
+        login = _ssh_login(private_key=key, passphrase=passphrase)
+
+        answer = login.opening_refusal(report)
+
+        assert (answer and answer[0]) == refusal
 
 
 class TestStoringASecret:

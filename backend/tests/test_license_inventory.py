@@ -253,6 +253,98 @@ class TestPythonLicense:
         aliases, the classifiers and the licence file read them as before."""
         assert inventory.python_license("", license_field, classifiers, texts) == expected
 
+    @pytest.mark.parametrize(
+        ("license_field", "classifiers", "texts", "expected"),
+        [
+            pytest.param(
+                "GPL-2.0+",
+                ["License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)"],
+                [],
+                ("GPL-2.0-or-later", "classifier"),
+                id="deprecated-plus",
+            ),
+            pytest.param(
+                "LGPL-2.1",
+                [],
+                [
+                    "GNU LESSER GENERAL PUBLIC LICENSE\nVersion 2.1, February 1999\n... either "
+                    "version 2.1 of the License, or (at your option) any later version."
+                ],
+                ("LGPL-2.1-or-later", "licence file text"),
+                id="deprecated-bare",
+            ),
+            pytest.param(
+                "MIT OR GPL-3.0",
+                ["License :: OSI Approved :: MIT License"],
+                [],
+                ("MIT", "classifier"),
+                id="deprecated-in-an-expression",
+            ),
+            # Nothing else names it, so it resolves to nothing and an override can answer it.
+            pytest.param(
+                "GPL-3.0", [], [], (None, "no readable licence metadata"), id="deprecated-alone"
+            ),
+            # SPDX lists `GPL-2.0+`, but not `AGPL-3.0+`; `packaging` accepts both.
+            pytest.param(
+                "AGPL-3.0+",
+                [
+                    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"
+                ],
+                [],
+                ("AGPL-3.0-or-later", "classifier"),
+                id="deprecated-with-plus",
+            ),
+            pytest.param(
+                "GPL-2.0-or-later+",
+                ["License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)"],
+                [],
+                ("GPL-2.0-or-later", "classifier"),
+                id="or-later-with-plus",
+            ),
+            pytest.param(
+                "GPL-3.0-only+", [], [], (None, "no readable licence metadata"), id="only-with-plus"
+            ),
+        ],
+    )
+    def test_a_license_field_with_a_deprecated_spdx_id_still_falls_through(
+        self,
+        license_field: str,
+        classifiers: list[str],
+        texts: list[str],
+        expected: tuple[str | None, str],
+    ) -> None:
+        """SPDX deprecated ids such as `GPL-2.0+` and `LGPL-2.1`, and the `+` that the
+        `-only` and `-or-later` ids replaced, but `packaging` still accepts all of
+        them, and old `setup.py` metadata uses them. No policy set names them.
+        Read as the answer, one would fail the check, and no entry in
+        `policy.toml` could correct it: an override applies only when nothing
+        resolved. So the classifiers and the licence file read them as before."""
+        assert inventory.python_license("", license_field, classifiers, texts) == expected
+
+    def test_the_deprecated_spdx_ids_come_from_packaging(self) -> None:
+        """The rule above reads `packaging`'s private SPDX table, the only place
+        that records which ids are deprecated. A `packaging` release that moves the
+        table fails the script's import, and this file with it. One that empties
+        the table, or stops marking these ids deprecated, fails here, before a
+        deprecated id can pass as a licence."""
+        assert {
+            "AGPL-1.0",
+            "AGPL-3.0",
+            "GFDL-1.3",
+            "GPL-2.0",
+            "GPL-2.0+",
+            "GPL-3.0",
+            "GPL-3.0+",
+            "LGPL-2.0",
+            "LGPL-2.1",
+            "LGPL-2.1+",
+            "LGPL-3.0",
+            "LGPL-3.0+",
+        } <= inventory.DEPRECATED_SPDX_IDS
+        assert not {"GPL-2.0-or-later", "LGPL-2.1-only", "EPL-2.0", "MIT"} & (
+            inventory.DEPRECATED_SPDX_IDS
+        )
+
     def test_an_override_yields_to_metadata_that_names_a_licence(self) -> None:
         policy = inventory.Policy({"python:lib": inventory.Override("ISC", "read upstream")}, {})
 

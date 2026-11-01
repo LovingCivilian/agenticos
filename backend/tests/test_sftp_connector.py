@@ -20,10 +20,13 @@ import asyncio
 import base64
 import inspect
 import logging
+import re
 import socket
 import stat
 import struct
 import threading
+import traceback
+import warnings
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -49,7 +52,7 @@ PASSPHRASE = "passphrase-of-the-key"
 SERVER_TEXT = "SERVER-TEXT"
 MTIME = 1_700_000_000
 # The part of the refusal of a host key pasted with something in front of it
-# (`design-amendments.md`, A3) that the other host key refusals do not say.
+# that the other host key refusals do not say.
 IN_FRONT = "without the host name or the options"
 PINNED = PinnedAddress(hostname=HOST, port=22, ips=("93.184.216.34",))
 
@@ -109,12 +112,14 @@ def _key_login(key: asyncssh.SSHKey, form: str, host: str = HOST) -> SshCredenti
     return _login(host, private_key=pem, passphrase=PASSPHRASE)
 
 
-def _corrupted_line(key_type: str) -> str:
+def _corrupted_line(key_type: str, *, negative: bool = False) -> str:
     """A public key line of `key_type` that asyncssh refuses with a plain `ValueError`.
 
     The type and every length stay right, so only the key itself is wrong: the
     ECDSA point gets an unknown prefix byte ("Unsupported elliptic curve point
-    type"), and the RSA exponent is made even ("e must be odd.").
+    type"), and the RSA exponent is made even ("e must be odd."). With
+    `negative`, the RSA modulus loses the zero byte that keeps it positive, and
+    asyncssh raises `OverflowError` instead.
     """
     blob = base64.b64decode(_line(asyncssh.generate_private_key(key_type)).split()[1])
     fields: list[bytes] = []
@@ -122,12 +127,18 @@ def _corrupted_line(key_type: str) -> str:
         size = struct.unpack(">I", blob[:4])[0]
         fields.append(blob[4 : 4 + size])
         blob = blob[4 + size :]
-    if key_type == "ssh-rsa":
+    if negative:
+        fields[2] = fields[2][1:]
+    elif key_type == "ssh-rsa":
         fields[1] = b"\x04"
     else:
         fields[2] = b"\x05" + fields[2][1:]
     packed = b"".join(struct.pack(">I", len(field)) + field for field in fields)
     return f"{key_type} {base64.b64encode(packed).decode()}"
+
+
+def _config_model() -> SftpConfig:
+    return SftpConfig.model_validate(_config())
 
 
 def _remote_file() -> RemoteFile:
@@ -206,12 +217,20 @@ def _resolve_to(monkeypatch: pytest.MonkeyPatch, *ips: str) -> list[tuple[str, i
 
 
 class _Sftp:
-    """An SFTP session that answers a listing from a map of folder paths to entries."""
+    """An SFTP session that answers a listing from a map of folder paths to entries.
+
+    `wait_closed` returns at once, as for a session that already ended, unless
+    the session is given an `ended` event: then it waits for that.
+    """
 
     def __init__(
-        self, folders: dict[bytes, list[tuple[bytes, asyncssh.SFTPAttrs]]] | None = None
+        self,
+        folders: dict[bytes, list[tuple[bytes, asyncssh.SFTPAttrs]]] | None = None,
+        *,
+        ended: asyncio.Event | None = None,
     ) -> None:
         self.folders = folders or {}
+        self.ended = ended
 
     async def scandir(self, path: bytes) -> AsyncIterator[asyncssh.SFTPName]:
         for name, attrs in self.folders[path]:
@@ -221,7 +240,8 @@ class _Sftp:
         return None
 
     async def wait_closed(self) -> None:
-        return None
+        if self.ended is not None:
+            await self.ended.wait()
 
 
 class _Connection:
@@ -415,6 +435,10 @@ class TestWhatTheFormAccepts:
             pytest.param("/drop/a\x00b", id="nul"),
             pytest.param("/drop/a\nb", id="newline"),
             pytest.param("/drop/a\x7fb", id="delete"),
+            pytest.param("/drop/a\x85b", id="next-line"),
+            pytest.param("/drop/a\x9bb", id="c1-control-sequence-introducer"),
+            pytest.param("/drop/a\u2028b", id="line-separator"),
+            pytest.param("/drop/a\u2029b", id="paragraph-separator"),
             pytest.param("/" + "a" * 1024, id="over-1024"),
         ],
     )
@@ -423,7 +447,9 @@ class TestWhatTheFormAccepts:
 
         A relative path depends on where the server starts the session, and `..`
         reaches above the folder the editor chose. A control character cannot be
-        part of a folder the form shows.
+        part of a folder the form shows, and the root is printed in sentences of
+        the sync log: C1 controls, NEL among them, and U+2028 and U+2029 break a
+        line there as a line feed does.
         """
         refusal = await SftpConnector().validate_config(_config(root_path=root))
 
@@ -450,9 +476,9 @@ class TestWhatTheFormAccepts:
         """A file's address holds the full path. One folder has one spelling, so two
         sources that name it in two ways file its documents under one address.
         `PurePosixPath` keeps a leading `//`, which POSIX leaves to the system, so
-        the connector folds it itself (`design-amendments.md`, A17). Whitespace
+        the connector folds it itself. Whitespace
         around the folder, such as the line end of a pasted path, is trimmed before
-        anything is checked, so it is neither refused nor kept (A19)."""
+        anything is checked, so it is neither refused nor kept."""
         assert SftpConfig.model_validate(_config(root_path=root)).root_path == kept
 
     @pytest.mark.security
@@ -544,6 +570,13 @@ class TestWhatTheFormAccepts:
                 lambda: _corrupted_line("ssh-rsa"), False, False, False, id="rsa-even-exponent"
             ),
             pytest.param(
+                lambda: _corrupted_line("ssh-rsa", negative=True),
+                False,
+                False,
+                False,
+                id="rsa-negative-modulus",
+            ),
+            pytest.param(
                 lambda: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIbroken",
                 False,
                 False,
@@ -576,8 +609,9 @@ class TestWhatTheFormAccepts:
         `ssh-keygen -lf` prints, two lines or a PEM block, gets the general sentence.
         Each sentence is ours: the text asyncssh or `cryptography` raises never
         reaches the form, and the refusal does not repeat the paste. A corrupted
-        ECDSA or RSA line makes them raise a plain `ValueError`, not `KeyImportError`
-        (`design-amendments.md`, A12).
+        ECDSA or RSA line makes them raise a plain `ValueError`, not `KeyImportError`,
+        and a negative RSA modulus an `OverflowError`, which a validator that caught
+        `ValueError` alone would let through as a server error.
 
         A PEM block is refused before asyncssh reads it, because asyncssh accepts a
         private key there and answers its public half. So a private key pasted by
@@ -587,7 +621,7 @@ class TestWhatTheFormAccepts:
         A line whose type is not its key's (`ssh-rsa` in front of an Ed25519 key)
         is refused by asyncssh's own check: `import_public_key` raises
         `KeyImportError` ("Public key algorithm mismatch"). The connector keeps no
-        check of its own (`design-amendments.md`, A2), so that case pins
+        check of its own, so that case pins
         asyncssh's behaviour.
         """
         pasted = value()
@@ -595,7 +629,7 @@ class TestWhatTheFormAccepts:
         real_import = asyncssh.import_public_key
         try:
             real_import(pasted.strip())
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             library: str | None = str(exc)
         else:
             library = None
@@ -658,6 +692,14 @@ class TestWhatTheFormAccepts:
             ),
             pytest.param(_config(extensions=["*.pdf"]), "extensions", id="not-an-extension"),
             pytest.param(_config(extensions=[" "]), "extensions", id="no-extension"),
+            pytest.param(
+                _config(extensions=[f".e{number:03d}" for number in range(101)]),
+                "extensions",
+                id="101-extensions",
+            ),
+            pytest.param(
+                _config(extensions=[".abcdefghijklmnop"]), "extensions", id="17-character-extension"
+            ),
         ],
     )
     async def test_validate_config_names_the_field_it_refuses(
@@ -713,7 +755,7 @@ class TestWhatTheFormAccepts:
         """The address check resolves the host name, and a lookup blocks. The form
         check runs on the API's request loop, so a name server that does not answer
         would stop every other request and agent stream there. Both checks run in a
-        thread (`design-amendments.md`, A17)."""
+        thread."""
         loop_thread = threading.get_ident()
         ran_on: list[int] = []
         _pin(monkeypatch, ran_on=ran_on)
@@ -977,6 +1019,14 @@ class TestTheConnection:
             assert (options.public_key_auth, options.password_auth) == (False, True)
             assert options.preferred_auth == ["password"]
 
+    def test_compression_is_never_negotiated(self) -> None:
+        """asyncssh inflates a compressed packet with no bound on what it inflates
+        to: 250 MB of zeros fit in one packet of 256 KiB. A server that offers only
+        compression would have it, so the client offers none."""
+        options = SftpConnector()._options(_login(), HOST_KEY_LINE)
+
+        assert list(options.compression_algs) == [b"none"]
+
     def test_the_connection_options_bound_the_connect_and_keep_it_alive(self) -> None:
         """asyncssh has no overall connect deadline by default, gives a login two
         minutes, and sends no keepalive. A server that takes the TCP connection and
@@ -998,8 +1048,7 @@ class TestTheConnection:
         anything. `config=None` keeps `~/.ssh/config` out of `connect()` itself, and
         the options are the hardened ones, with the pinned host key and the vault's
         user. `connect()` gets nothing else: asyncssh applies a keyword passed beside
-        `options` over them, so `gss_kex=True` there would undo the pin
-        (`design-amendments.md`, A17)."""
+        `options` over them, so `gss_kex=True` there would undo the pin."""
         ips = ("2606:4700::1111", "93.184.216.34")
         _pin(monkeypatch, PinnedAddress(hostname=HOST, port=2222, ips=ips))
         dials = _Dialler(monkeypatch, ConnectionRefusedError(111, "refused"), _Connection())
@@ -1052,28 +1101,98 @@ class TestTheConnection:
 
         assert connection.sftp_options == {"path_encoding": None, "sftp_version": 3}
 
+    @pytest.mark.parametrize(
+        "make",
+        [
+            pytest.param(lambda: asyncssh.SFTPConnectionLost("lost"), id="session-lost"),
+            pytest.param(
+                lambda: asyncssh.SFTPNoConnection("Connection not open"), id="session-ended"
+            ),
+            pytest.param(
+                lambda: ConnectionResetError(104, "Connection reset by peer"), id="tcp-reset"
+            ),
+        ],
+    )
     async def test_a_connection_lost_during_a_request_is_dropped_and_the_next_file_opens_a_new_one(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, make: Callable[[], BaseException], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An SFTP session can be lost while its SSH connection stays open. Kept, it
-        would answer each later file of the sync with the same loss. So the
-        connection is aborted and forgotten, and the next file opens a new one."""
+        """An SFTP session can be lost while its SSH connection stays open: its
+        channel closed, so asyncssh answers each later request "not open". Or the
+        TCP connection fails, and asyncssh hands each request the `OSError` as it
+        is. Kept, the connection would answer each later file of the sync with the
+        same loss, as a refusal. So it is aborted and forgotten, the file gets our
+        sentence, and the next file opens a new connection. Both sessions here stay open unless something ends them."""
         _pin(monkeypatch)
-        lost, fresh = _Connection(), _Connection()
+        lost = _Connection(sftp=_Sftp(ended=asyncio.Event()))
+        fresh = _Connection(sftp=_Sftp(ended=asyncio.Event()))
         dials = _Dialler(monkeypatch, lost, fresh)
         connector = SftpConnector()
         parsed = SftpConfig.model_validate(_config())
         await connector._client(parsed, _login())
 
         async def request() -> None:
-            raise asyncssh.SFTPConnectionLost("lost")
+            raise make()
 
-        with pytest.raises(ExternalServiceError):
+        with pytest.raises(ExternalServiceError, match=f"^The connection to {HOST} was lost.$"):
             await connector._call(request())
 
         assert await connector._client(parsed, _login()) is fresh.sftp
         assert "abort" in lost.order
         assert len(dials.calls) == 2
+        await connector.aclose()
+
+    async def test_an_sftp_session_that_ended_while_its_connection_stays_open_is_opened_again(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OpenSSH's `ChannelTimeout` ends an idle SFTP session and keeps the SSH
+        connection open, and so does an `sftp-server` that exits. A sync idles while
+        it embeds a long file. The session is watched, so the next file finds it
+        ended before it asks anything, and opens a new connection instead of
+        failing. An open session is used again."""
+        _pin(monkeypatch)
+        ended = asyncio.Event()
+        first = _Connection(sftp=_Sftp(ended=ended))
+        second = _Connection(sftp=_Sftp(ended=asyncio.Event()))
+        dials = _Dialler(monkeypatch, first, second)
+        connector = SftpConnector()
+        parsed = SftpConfig.model_validate(_config())
+
+        assert await connector._client(parsed, _login()) is first.sftp
+        await asyncio.sleep(0)
+        assert await connector._client(parsed, _login()) is first.sftp
+        assert len(dials.calls) == 1
+
+        ended.set()
+        await asyncio.sleep(0)
+
+        assert await connector._client(parsed, _login()) is second.sftp
+        assert "abort" in first.order
+        assert len(dials.calls) == 2
+        await connector.aclose()
+
+    async def test_a_kept_refusal_is_raised_with_a_fresh_traceback_for_each_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refusal kept for the rest of the sync is raised again for each file.
+        Raised as it is, one exception would gather the frames of every file, and
+        keep their locals alive until the sync ends: a server down for maintenance
+        with 100,000 files left holds hundreds of megabytes. Each raise starts its
+        traceback afresh."""
+        _pin(monkeypatch)
+        _Dialler(monkeypatch, asyncssh.PermissionDenied("denied"))
+        connector = SftpConnector()
+        parsed = SftpConfig.model_validate(_config())
+        with pytest.raises(BadRequestError) as first:
+            await connector._client(parsed, _login())
+
+        depths: list[int] = []
+        for _ in range(20):
+            with pytest.raises(BadRequestError) as again:
+                await connector._client(parsed, _login())
+            assert again.value is first.value
+            depths.append(len(traceback.extract_tb(again.value.__traceback__)))
+
+        assert depths == [depths[0]] * 20
 
     async def test_a_refused_sftp_session_does_not_leave_its_connection_open(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1130,7 +1249,7 @@ class TestTheConnection:
         not answer would cost each remaining file the connect timeout, and a refused
         password would be sent again. So every failed connect, of any kind, is kept
         for the rest of the sync, and each later file gets the same refusal at once,
-        with nothing checked or dialled again (`design-amendments.md`, A19). A
+        with nothing checked or dialled again. A
         connection that was open and then lost between files is not a failed connect,
         and is opened again (the test of a connection lost during a request)."""
         if answer is None:
@@ -1179,7 +1298,7 @@ class TestTheConnection:
 
         asyncssh does not wrap every parse failure: `cryptography` raises a plain
         `ValueError`, and a cut paste a `UnicodeDecodeError`. Each one is a key that
-        does not open (`design-amendments.md`, A12)."""
+        does not open."""
         _pin(monkeypatch)
         dials = _Dialler(monkeypatch)
         login = _key_login(asyncssh.generate_private_key("ssh-ed25519"), "encrypted-openssh")
@@ -1201,6 +1320,132 @@ class TestTheConnection:
         assert again.value is first.value
         assert len(tried) == 1
         assert dials.calls == []
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        ("damage", "reaches_asyncssh"),
+        [
+            pytest.param("negative-count", True, id="pkcs8-negative-pbkdf2-count"),
+            pytest.param("label-with-a-bracket", False, id="pem-label-with-a-bracket"),
+        ],
+    )
+    async def test_a_damaged_private_key_is_refused_in_our_words(
+        self, damage: str, reaches_asyncssh: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """asyncssh's key parser raises more than `ValueError` for a damaged key: a
+        negative PBKDF2 count gives `OverflowError`, and a PEM label with a `[` gives
+        `re.error`, because asyncssh makes a pattern of the label without escaping
+        it. Fuzzing found both. Each is a key that does not open, refused in our
+        sentence and kept, never an error the sync log shows by its class name.
+
+        The label is checked before asyncssh reads the key at all: a pattern made
+        of a label such as `(a+)+` would backtrack for hours. The vault checks it
+        as it parses a login, and the connector parses the login again before it
+        opens the key, so this login is built without that check."""
+        key = asyncssh.generate_private_key("ecdsa-sha2-nistp256")
+        pem = key.export_private_key("pkcs8-pem", PASSPHRASE).decode()
+        if damage == "negative-count":
+            lines = pem.splitlines()
+            der = base64.b64decode("".join(lines[1:-1]))
+            # The iteration count, 2048, as a DER integer; 0x88 makes it negative.
+            der = der.replace(b"\x02\x02\x08\x00", b"\x02\x02\x88\x00", 1)
+            pem = f"{lines[0]}\n{base64.encodebytes(der).decode()}{lines[-1]}\n"
+        else:
+            # Split, so the repository's private-key hook does not read the
+            # label of a key made in this test as a committed key.
+            label = "ENCRYPTED " + "PRIVATE KEY"
+            pem = pem.replace(f"BEGIN {label}", f"BEGIN {label.replace(' ', '[ ', 1)}")
+        expected = OverflowError if reaches_asyncssh else re.error
+        with pytest.raises(expected), warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            asyncssh.import_private_key(pem, PASSPHRASE)
+        login = SshCredentialsSecret.model_construct(
+            username="sync",
+            host=HOST,
+            private_key=SecretStr(pem),
+            passphrase=SecretStr(PASSPHRASE),
+            password=None,
+        )
+        read: list[object] = []
+        real_import = asyncssh.import_private_key
+
+        def import_private_key(*args: object, **kwargs: object) -> asyncssh.SSHKey:
+            read.append(args)
+            return real_import(*args, **kwargs)
+
+        monkeypatch.setattr(asyncssh, "import_private_key", import_private_key)
+        _pin(monkeypatch)
+        dials = _Dialler(monkeypatch)
+        connector = SftpConnector()
+        parsed = SftpConfig.model_validate(_config())
+
+        with pytest.raises(BadRequestError) as first:
+            await connector._client(parsed, login)
+        with pytest.raises(BadRequestError) as again:
+            await connector._client(parsed, login)
+
+        assert first.value.message == (
+            "The private key in the Vault could not be read with its passphrase."
+        )
+        assert first.value.__cause__ is None
+        assert again.value is first.value
+        assert bool(read) is reaches_asyncssh
+        assert dials.calls == []
+
+    async def test_the_private_key_is_opened_once_a_sync_and_reused_to_reconnect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opening a key runs its key derivation, up to the vault's budget. A sync
+        that reconnects - a session the server ended, a lost connection - reuses
+        the key its first connect opened. Another login opens its own."""
+        opened: list[object] = []
+        real_import = asyncssh.import_private_key
+
+        def import_private_key(*args: object, **kwargs: object) -> asyncssh.SSHKey:
+            opened.append(args)
+            return real_import(*args, **kwargs)
+
+        login = _key_login(asyncssh.generate_private_key("ssh-ed25519"), "encrypted-openssh")
+        other = _key_login(asyncssh.generate_private_key("ssh-ed25519"), "encrypted-openssh")
+        monkeypatch.setattr(asyncssh, "import_private_key", import_private_key)
+        _pin(monkeypatch)
+        dials = _Dialler(monkeypatch, _Connection(), _Connection(), _Connection())
+        connector = SftpConnector()
+        parsed = SftpConfig.model_validate(_config())
+
+        await connector._client(parsed, login)
+        connector._drop()
+        await connector._client(parsed, login)
+        assert len(opened) == 1
+
+        connector._drop()
+        await connector._client(parsed, other)
+        assert len(opened) == 2
+        assert len(dials.calls) == 3
+
+    async def test_the_private_key_opens_off_the_event_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An encrypted key opens through its KDF: about a second at the vault's
+        ceiling of 128 bcrypt rounds. The sync's loop runs other work meanwhile, so
+        the key opens in a thread, as the address check does."""
+        loop_thread = threading.get_ident()
+        opened_on: list[int] = []
+        real_import = asyncssh.import_private_key
+
+        def import_private_key(*args: object, **kwargs: object) -> asyncssh.SSHKey:
+            opened_on.append(threading.get_ident())
+            return real_import(*args, **kwargs)
+
+        login = _key_login(asyncssh.generate_private_key("ssh-ed25519"), "encrypted-openssh")
+        monkeypatch.setattr(asyncssh, "import_private_key", import_private_key)
+        _pin(monkeypatch)
+        _Dialler(monkeypatch, _Connection())
+
+        await SftpConnector()._client(SftpConfig.model_validate(_config()), login)
+
+        assert opened_on
+        assert all(thread != loop_thread for thread in opened_on)
 
     @pytest.mark.security
     @pytest.mark.parametrize("mode", ["password", "key"])
@@ -1344,7 +1589,7 @@ class TestTheConnection:
     ) -> None:
         """A name can resolve to an IPv6 address that does not answer and an IPv4
         address that refuses at once. Each address is tried, and the sentence is the
-        one for the last address tried (`design-amendments.md`, A17)."""
+        one for the last address tried."""
         ips = ("2606:4700::1111", "93.184.216.34")
         _pin(monkeypatch, PinnedAddress(hostname=HOST, port=22, ips=ips))
         dials = _Dialler(monkeypatch, *answers())
@@ -1521,8 +1766,7 @@ class TestTheConnection:
         Each sentence but the private key's names the host, so the log says which
         source failed. `_refused` writes the server's text to a warning record. The
         text of a key error is the library's, and can hold bytes of the key, so it
-        reaches no record, and the refusal is raised `from None`
-        (`design-amendments.md`, A12).
+        reaches no record, and the refusal is raised `from None`.
 
         `mapped` asks `_refused` directly. `dial` raises from `asyncssh.connect`,
         `session` from `start_sftp_client`, `request` from inside `_call` on a
@@ -1550,6 +1794,35 @@ class TestTheConnection:
         if where == "mapped" and says != "private key":
             warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
             assert any(SERVER_TEXT in caplog.handler.format(r) for r in warnings)
+
+    @pytest.mark.security
+    @pytest.mark.parametrize("where", ["connect", "request"])
+    async def test_a_server_s_message_reaches_the_log_on_one_line(
+        self, where: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A server writes the reason of its disconnect and its status messages, and
+        one with a line break would write a log line of its own choosing. The text
+        is logged escaped, never as the exception, which the formatter would turn
+        into text after the log filter ran."""
+        caplog.set_level(logging.WARNING)
+        forged = "gone\nERROR app.core.auth admin password reset for root\u2028"
+        connector = SftpConnector()
+        if where == "connect":
+            connector._refused(asyncssh.DisconnectError(11, forged), _config_model(), _login())
+        else:
+            _pin(monkeypatch)
+            _Dialler(monkeypatch, _Connection())
+            await connector._client(_config_model(), _login())
+
+            async def request() -> None:
+                raise asyncssh.SFTPConnectionLost(forged)
+
+            with pytest.raises(ExternalServiceError):
+                await connector._call(request())
+
+        lines = [caplog.handler.format(record) for record in caplog.records]
+        assert any("gone?ERROR" in line for line in lines)
+        assert all("\n" not in line and "\u2028" not in line for line in lines)
 
     @staticmethod
     async def _refusal(
@@ -1587,6 +1860,78 @@ class TestTheConnection:
         with pytest.raises(AppException) as caught:
             await connector._client(parsed, login)
         return caught.value
+
+
+class TestTheRootInSentences:
+    """Every sentence that prints the root shows it as `_shown` does, whatever the
+    root holds. The form refuses a root with a
+    control character, so these configs are built without its check."""
+
+    @staticmethod
+    def _forged() -> SftpConfig:
+        return SftpConfig.model_construct(
+            host=HOST,
+            port=22,
+            root_path="/drop\u2028Your login expired.\x85",
+            host_key=HOST_KEY_LINE,
+            include_subfolders=True,
+            extensions=[".pdf"],
+        )
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(asyncssh.SFTPNoSuchFile("no"), id="no-such-folder"),
+            pytest.param(asyncssh.SFTPPermissionDenied("no"), id="permission-denied"),
+            pytest.param(asyncssh.SFTPFailure("no"), id="failure"),
+        ],
+    )
+    def test_a_root_that_cannot_be_listed_is_shown_without_its_line_breaks(
+        self, exc: asyncssh.SFTPError
+    ) -> None:
+        refusal = SftpConnector._root_refused(exc, self._forged(), _login())
+
+        assert "/drop?Your login expired.?" in refusal.message
+        assert not re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", refusal.message)
+
+    @pytest.mark.security
+    async def test_the_depth_bound_shows_the_root_without_its_line_breaks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sftp_module, "MAX_DEPTH", 0)
+        parsed = self._forged()
+        sftp = _Sftp({parsed.root_path.encode(): [(b"sub", _folder())]})
+
+        listing = await SftpConnector()._walk(sftp, parsed, _login())
+
+        assert listing.problems == [
+            f"The listing of {HOST} stopped at 0 folder levels below /drop?Your login "
+            "expired.?, so the folders below them were not read. Choose a narrower folder."
+        ]
+
+
+class TestStoredConfigs:
+    async def test_a_stored_config_over_the_limits_still_lists_and_a_saved_one_does_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The extension limits apply when a config is saved. A config read back at
+        sync time is normalized and never refused for them, for SFTP as for
+        SharePoint, so a rule added later cannot fail every sync of a source saved
+        before it."""
+        extensions = [f".e{number:03d}" for number in range(149)] + ["   .PDF   "]
+        config = _config(extensions=extensions)
+        _pin(monkeypatch)
+        sftp = _Sftp({b"/drop": [(b"a.pdf", _file(3)), (b"b.e042", _file(3))]})
+        _Dialler(monkeypatch, _Connection(sftp=sftp))
+
+        listing = await SftpConnector().list_files(config, _login())
+        refusal = await SftpConnector().validate_config(config)
+
+        assert [file.id for file in listing.files] == ["/drop/a.pdf", "/drop/b.e042"]
+        assert refusal is not None
+        assert refusal.field == "extensions"
+        assert "At most 100" in refusal.message
 
 
 class TestTheChangeSignal:
@@ -1637,6 +1982,46 @@ class TestTheBounds:
             await connector._call(stalled())
 
         assert connection.order == ["abort", "cancelled", "cleaned up"]
+
+    async def test_a_request_the_stall_aborted_reports_the_stall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The listing reads several folders at once on one connection. When one
+        request stalls, the connection is aborted, and the requests pending beside
+        it fail with it. Each reports the stall, the cause, rather than a lost
+        connection, whichever of them the listing hears from first."""
+        monkeypatch.setattr(sftp_module, "REQUEST_SECONDS", 0.2)
+        connection = _Connection()
+        connector = SftpConnector()
+        connector._conn = connection
+        connector._sftp = connection.sftp
+        connector._host = HOST
+
+        async def stalled() -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+        async def beside() -> bytes:
+            await connection.aborted.wait()
+            raise asyncssh.SFTPConnectionLost("Connection closed")
+
+        async def later() -> None:
+            # Asked when the first request is half way to its deadline, so the abort
+            # fails it inside its own.
+            await asyncio.sleep(0.1)
+            await connector._call(beside())
+
+        with anyio.fail_after(5):
+            outcomes = await asyncio.gather(
+                connector._call(stalled()), later(), return_exceptions=True
+            )
+
+        assert [type(outcome) for outcome in outcomes] == [ExternalServiceError] * 2
+        assert all(
+            isinstance(outcome, ExternalServiceError)
+            and outcome.message == f"{HOST} did not answer within 0.2 seconds."
+            for outcome in outcomes
+        )
 
     async def test_aclose_is_safe_twice_and_before_a_connection(self) -> None:
         """A sync calls `aclose` when it is over, whether a connection was opened or

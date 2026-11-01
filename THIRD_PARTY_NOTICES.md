@@ -24,32 +24,35 @@ names no author is in the evidence column below.
 | Licence | Backend | Frontend |
 |---|---:|---:|
 | MIT | 99 | 241 |
-| Apache-2.0 | 67 | 24 |
+| Apache-2.0 | 66 | 24 |
 | BSD-3-Clause | 23 | 4 |
 | ISC | 3 | 16 |
 | BSD-2-Clause | 7 | 0 |
 | Apache-2.0 AND MIT | 1 | 2 |
 | LGPL-3.0-or-later | 1 | 2 |
-| MPL-2.0 | 3 | 0 |
 | PSF-2.0 | 3 | 0 |
 | 0BSD | 1 | 1 |
+| MPL-2.0 | 2 | 0 |
 | AGPL-3.0-only | 1 | 0 |
 | Apache-2.0 AND CNRI-Python | 1 | 0 |
 | Apache-2.0 OR BSD-2-Clause | 1 | 0 |
 | Apache-2.0 OR BSD-3-Clause | 1 | 0 |
 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 1 | 0 |
 | CC-BY-4.0 | 0 | 1 |
+| EPL-2.0 OR GPL-2.0-or-later | 1 | 0 |
 | LGPL-2.1-or-later | 1 | 0 |
 | LGPL-3.0-only | 1 | 0 |
 | MIT AND ISC | 0 | 1 |
 | MIT AND PSF-2.0 | 1 | 0 |
+| MIT OR Apache-2.0 | 1 | 0 |
 | MIT-0 | 1 | 0 |
 | MIT-CMU | 1 | 0 |
+| MPL-2.0 AND MIT | 1 | 0 |
 | Unlicense | 1 | 0 |
 
 ## Backend image (Python)
 
-219 distributions.
+220 distributions.
 
 | Component | Version | Licence | Source | Evidence |
 |---|---|---|---|---|
@@ -68,6 +71,7 @@ names no author is in the evidence column below.
 | anyio | 4.15.1 | MIT | https://github.com/agronholm/anyio | License-Expression |
 | asgiref | 3.13.0 | BSD-3-Clause | https://asgi.readthedocs.io/ | License field |
 | asyncpg | 0.32.0 | Apache-2.0 | https://github.com/MagicStack/asyncpg | License-Expression |
+| asyncssh | 2.24.1 | EPL-2.0 OR GPL-2.0-or-later | https://github.com/ronf/asyncssh | License field; review accepted |
 | attrs | 26.1.0 | MIT | https://github.com/python-attrs/attrs | License-Expression |
 | authlib | 1.9.1 | BSD-3-Clause | https://github.com/authlib/authlib | License field |
 | backoff | 2.2.1 | MIT | https://github.com/litl/backoff | License field |
@@ -240,7 +244,7 @@ names no author is in the evidence column below.
 | simple-websocket | 1.1.0 | MIT | https://github.com/miguelgrinberg/simple-websocket | classifier |
 | six | 1.17.0 | MIT | https://github.com/benjaminp/six | License field |
 | slack-sdk | 3.45.0 | MIT | https://github.com/slackapi/python-slack-sdk | License field |
-| sniffio | 1.3.1 | Apache-2.0 | https://github.com/python-trio/sniffio | licence file text |
+| sniffio | 1.3.1 | MIT OR Apache-2.0 | https://github.com/python-trio/sniffio | License field |
 | soupsieve | 3.0.4 | MIT | https://github.com/facelessuser/soupsieve | License-Expression |
 | sqlalchemy | 2.1.6 | MIT | https://github.com/sqlalchemy/sqlalchemy | License-Expression |
 | sse-starlette | 3.6.0 | BSD-3-Clause | https://github.com/sysid/sse-starlette | License-Expression |
@@ -252,7 +256,7 @@ names no author is in the evidence column below.
 | tiktoken | 0.14.0 | MIT | https://github.com/openai/tiktoken | License field |
 | tokenizers | 0.23.3 | Apache-2.0 | https://github.com/huggingface/tokenizers | classifier; no licence file, attributed to Nicolas Patry, Anthony Moi |
 | toml | 0.10.2 | MIT | https://github.com/uiri/toml | License field |
-| tqdm | 4.70.1 | MPL-2.0 | https://github.com/tqdm/tqdm | licence file text; review accepted |
+| tqdm | 4.70.1 | MPL-2.0 AND MIT | https://github.com/tqdm/tqdm | License field; review accepted |
 | truststore | 0.10.5 | MIT | https://github.com/sethmlarson/truststore | License-Expression |
 | typer | 0.25.1 | MIT | https://github.com/fastapi/typer | License-Expression |
 | types-requests | 2.33.0.20261006 | Apache-2.0 | https://github.com/python/typeshed | License-Expression |
