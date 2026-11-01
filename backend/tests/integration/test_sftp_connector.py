@@ -1254,16 +1254,38 @@ async def test_a_file_changed_after_the_listing_is_read_as_its_new_version(
     """A listing is minutes old when a large source reaches a file. The download
     reports the revision of the bytes it wrote, from a stat after the read, never
     the listed one. Stored under the listed revision, the new bytes would be
-    skipped for good once the old ones came back."""
+    skipped for good once the old ones came back.
+
+    A file that moved since the listing must also still have the mode the listing
+    gave it. A server that fakes the mode it lists, as ProFTPD does with
+    `DirFakeMode`, cannot show that, so there the fetch refuses the file once as
+    not the file it listed, and the next listing reads the new version. On a real
+    server either outcome is right. The in-process server lists the true mode, so
+    there the new version reads at once."""
     path = server.path("policy.md")
     await server.writer.write(path, b"the policy, before", mtime=MTIME)
     listed = (await _listed(connector, server))[path]
     edited = b"the policy, after an edit"
     await server.writer.write(path, edited, mtime=MTIME + 60)
 
-    fetched = await connector.fetch_file(
-        listed, out, config=server.config(), credential=server.login
-    )
+    if server.kind == "in-process":
+        fetched = await connector.fetch_file(
+            listed, out, config=server.config(), credential=server.login
+        )
+    else:
+        try:
+            fetched = await connector.fetch_file(
+                listed, out, config=server.config(), credential=server.login
+            )
+        except ExternalServiceError as refused:
+            assert refused.message == (
+                "The server opened a file for policy.md that is not the file it listed. "
+                "Check that nobody can replace files in this folder with links."
+            )
+            relisted = (await _listed(connector, server))[path]
+            fetched = await connector.fetch_file(
+                relisted, out, config=server.config(), credential=server.login
+            )
 
     assert fetched.path.read_bytes() == edited
     assert fetched.revision == f"{len(edited)}:{MTIME + 60}"
