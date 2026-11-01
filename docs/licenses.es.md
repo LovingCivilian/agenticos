@@ -1,5 +1,5 @@
 ---
-source_sha: "445f16218979"
+source_sha: "7f25591fa46d"
 ---
 
 # Licencias y avisos de terceros { #licences-and-third-party-notices }
@@ -48,10 +48,17 @@ Lo llevan dos archivos, y un script los mantiene honestos.
 se genera y se versiona. Para cada distribución de cualquiera de las dos imágenes
 registra el nombre, la versión, la expresión de licencia SPDX, la URL del código
 fuente y la evidencia de la que se leyó la licencia: una cabecera
-`License-Expression`, un classifier, el texto del propio archivo de licencia, el
-índice de paquetes, o un override que registró una persona. También lista primero
-los hallazgos abiertos, un recuento de componentes por licencia y los componentes
-registrados a mano.
+`License-Expression`, el campo `License`, un classifier, el texto del propio
+archivo de licencia, el índice de paquetes, o un override que registró una
+persona. También lista primero los hallazgos abiertos, un recuento de componentes
+por licencia y los componentes registrados a mano.
+
+El script lee un campo `License` que es una expresión SPDX válida como tal
+expresión, antes que los classifiers y el archivo de licencia. Una expresión que
+contiene un id SPDX obsoleto, como `GPL-2.0+` o `LGPL-2.1`, o un `+` detrás de un
+id `-only` u `-or-later`, no se toma, porque ningún conjunto de la política nombra
+esos ids. Para un campo así, el script lee las grafías conocidas del campo, los
+classifiers y el archivo de licencia, como antes.
 
 **`licenses/policy.toml`** guarda las decisiones. Una entrada `override` es la
 licencia que una persona determinó para un componente cuyos metadatos no la
@@ -114,7 +121,8 @@ cifra actual es la del propio archivo de avisos.
 | MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, MIT-0, MIT-CMU, Unlicense | unos 400 | Conservar el aviso de copyright y el texto de la licencia junto con las copias | El archivo de licencia de cada paquete viaja dentro de la imagen, al lado del código: el `*.dist-info/` de cada wheel en la imagen del backend, y el archivo de licencia de cada paquete bajo `/app/licenses/node_modules/<name>/` en la del frontend. Los avisos los indexan |
 | Apache-2.0 | unos 90 | El texto de la licencia, el aviso de los cambios y cualquier archivo `NOTICE` que lleve el paquete | Igual que arriba; no se modifica nada, así que no hay cambios de los que avisar |
 | PSF-2.0, CNRI-Python, Zlib, CC0-1.0 | unos pocos | Atribución o nada | Igual que arriba |
-| MPL-2.0 (`bidict`, `certifi`, `pathspec`, `tqdm`, parte de `orjson`) | 5 | Copyleft por archivo: los archivos cubiertos siguen bajo MPL y su código fuente está disponible | Se usan sin modificar; el texto de la licencia viaja con ellos; los avisos enlazan el código fuente |
+| MPL-2.0 (`bidict`, `certifi`, `pathspec`, parte de `orjson`), y MPL-2.0 AND MIT (`tqdm`) | 5 | Copyleft por archivo: los archivos cubiertos siguen bajo MPL y su código fuente está disponible. Las partes MIT de `tqdm` conservan su aviso | Se usan sin modificar. El texto de la licencia viaja con ellos, y el único archivo de licencia de `tqdm` lleva los dos textos. Los avisos enlazan el código fuente |
+| EPL-2.0 OR GPL-2.0-or-later (`asyncssh`) | 1 | Dual; se toma bajo la EPL-2.0 sin la GPL como Secondary License. Copyleft por archivo: el texto de la licencia, los avisos de sus archivos y dónde está su código fuente. Un despliegue que lo incluye en una oferta comercial de producto asume también la indemnización de la EPL por sus propias garantías (art. 4) | El cliente SSH del conector de sincronización SFTP, que además comprueba la clave de un login SSH en el vault. Un wheel de Python puro, importado sin modificar. El texto de la EPL-2.0 va en su dist-info, sus archivos `.py` son su código fuente con las cabeceras intactas, y los avisos enlazan el código fuente. Su copyleft solo alcanza a los archivos de asyncssh modificados, así que la licencia propia de AgenticOS no cambia |
 | LGPL-3.0-or-later (`psycopg2-binary`, `@img/sharp-libvips-linux-*`) | 3 | Texto de la licencia, disponibilidad del código fuente y la posibilidad de sustituir la biblioteca | Ambos son binarios instalados por separado y cargados dinámicamente, sin modificar, sustituibles reinstalándolos; el código fuente va enlazado en los avisos. Los paquetes de libvips no publican archivo de licencia, así que la imagen coloca el texto de la LGPL junto a ellos |
 | LGPL-3.0-only (`ldap3`) | 1 | Texto de la licencia, disponibilidad del código fuente y la posibilidad de sustituir la biblioteca | El cliente LDAP del inicio de sesión con el directorio, un wheel de Python puro importado sin modificar y sustituible reinstalándolo; sus archivos de licencia van en su dist-info y su código fuente va enlazado en los avisos |
 | Artistic-1.0-Perl o GPL-2.0-or-later (`text-unidecode`) | 1 | Dual; se toma bajo la Artistic License: aviso y texto | El archivo de licencia del wheel viaja con él |

@@ -90,6 +90,7 @@ decides which fields exist.
 | `gcp_service_account` | The service account JSON, validated on the way in |
 | `github_oauth_app` | A GitHub OAuth App's public client id and its secret |
 | `git_token` | An access token for git over HTTPS, and the one host it may be sent to |
+| `ssh_credentials` | A user name with a private key or a password, for an SFTP server, and the one host it may be used with |
 | `entra_app` | A Microsoft Entra app registration's tenant id, client id and client secret |
 | `openai_codex` | A ChatGPT sign-in: an access token, a refresh token and the account id |
 | `none` | Not a secret — the marker for an endpoint needing no credential |
@@ -118,6 +119,49 @@ OpenAI API key for voice features. The picker never changes a credential's acces
 whoever edits the source chooses. Bound to the host the token was added with, the
 token cannot be aimed at another server by editing the source, and no other key
 can stand in for it.
+
+`ssh_credentials` is the SSH login an SFTP sync source reads a folder with. It
+carries its host for the same reason: whoever edits the source types the server's
+address, and the connector sends the login only to the host and port it was added
+for. A login added without a port is used on port 22 only. The host is stored as a
+source spells it - lower case, IDNA-encoded, an IPv6 address compressed, with no
+trailing dot - so one host cannot fail to match because it was typed another way.
+Unlike a `git_token`'s host, it may hold an underscore, such as `sftp_server`.
+
+A login holds a private key, with its passphrase if the key is encrypted, or a
+password, never both. The key is checked on the way in, in two steps:
+
+- **What costs nothing** runs whenever a login is parsed, also each time the vault
+  opens one. The key may be at most 16,384 characters, and a passphrase or a
+  password at most 1,024, so nothing longer is decoded. The paste must be a
+  private key block the SSH library reads, an
+  encrypted key needs its passphrase, and the key's own work factor may be at
+  most 128 bcrypt rounds (OpenSSH), or 1,000,000 iterations and a 64-byte derived
+  key (PKCS#8). The work factor is read from the key's header, without decrypting
+  it.
+- **Opening the key** with its passphrase runs only when a login is saved, after
+  the caller is allowed to write it. It runs in a short-lived child process that
+  imports nothing of the application and gets the key on its standard input.
+  The child may take 5 seconds, and is killed after that. At most two run at once
+  in each API process, and a save that finds both busy is refused at once, with
+  status 503.
+
+The child refuses an RSA key of more than 4096 bits, or one whose two primes
+differ in size by more than 16 bits, without checking its numbers, because that
+check grows fast with the size of each prime. It also refuses a key held on a
+security key (`sk-`): the worker has no hardware key to sign with.
+
+The child is needed because the expensive numbers of an encrypted key are inside
+the part that only decrypting shows, and an RSA key is checked with Python's
+interpreter lock held, so a thread does not keep it off the event loop. So a key
+that does not open is refused while the form is open, not at the first sync, and
+only a caller who may write the login can make the server open one. The worker
+opens the key again once in each sync, which costs no more than the check
+allowed.
+
+Its hint is the last four characters of the user name, which is not secret. Four
+characters of a key would be its PEM armour. See [SFTP
+setup](howto/configure-sync-sources.md#sftp-setup).
 
 `entra_app` is what a SharePoint or OneDrive sync source signs in as. Its reach is
 set in Microsoft Entra, not here: the Graph permissions an administrator consented

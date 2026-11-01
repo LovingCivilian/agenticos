@@ -20,7 +20,7 @@ Maintained by the AgenticOS team. Sources checked 21 October 2026. AgenticOS bas
 | Where it runs | Sauna's cloud; US infrastructure for US customers, and data may be processed in the US | Your infrastructure, with Docker Compose |
 | Source | Proprietary | Apache-2.0 |
 | Models | The Sauna Lite model on Lite; all models from Basic; custom models from Pro | 28 providers, including Ollama and LiteLLM on your own hardware |
-| Knowledge | Files you drop in, memory it learns, and the tools you connect | Document collections in your Postgres, with parsing and chunking you choose, and five sync connectors |
+| Knowledge | Files you drop in, memory it learns, and the tools you connect | Document collections in your Postgres, with parsing and chunking you choose, and six sync connectors |
 | Surfaces | Web app, iOS app, iMessage, Slack, Gmail, Superhuman, email | Web chat, widget, hosted page, HTTP API, WebSocket, Slack, Telegram, Mattermost |
 | Sharing | Private by default; share with chosen people, and a company-wide shared brain on Team | Six roles, 33 permissions and per-resource grants, per organization |
 | Autonomy | Configurable, from suggesting actions to acting on its own | Approvals per capability, per tool and per MCP connection, decided by a person with `approvals:decide` |
@@ -51,7 +51,7 @@ Sauna lets you set how much it may do without you. In AgenticOS a tool the agent
 
 ### Knowledge you can inspect
 
-Sauna keeps the files you drop in and pulls from them when it works. AgenticOS adds managed document collections: you choose the [parser](../file-processing.md#parser-selection-rag) and [chunking](../file-processing.md#chunking-configuration) per collection. You can sync from Google Drive, S3, SharePoint or OneDrive, a website or a git repository.
+Sauna keeps the files you drop in and pulls from them when it works. AgenticOS adds managed document collections: you choose the [parser](../file-processing.md#parser-selection-rag) and [chunking](../file-processing.md#chunking-configuration) per collection. You can sync from Google Drive, S3, SharePoint or OneDrive, a website, a git repository or a folder on an SFTP server.
 
 ## When Sauna is enough
 

@@ -40,7 +40,7 @@ OpenCode's permissions protect the developer's machine. AgenticOS records every 
 
 ### Knowledge beyond the repository
 
-OpenCode reads the repository and whatever MCP servers return. AgenticOS keeps company documents in [collections](../file-processing.md#rag-document-ingestion) with per-collection parsing and sync from Drive, S3, SharePoint, websites and git.
+OpenCode reads the repository and whatever MCP servers return. AgenticOS keeps company documents in [collections](../file-processing.md#rag-document-ingestion) with per-collection parsing and sync from Drive, S3, SharePoint, websites, git and SFTP servers.
 
 ## When OpenCode is the right tool
 

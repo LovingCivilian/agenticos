@@ -1,12 +1,12 @@
 ---
-source_sha: "3fe463db0444"
+source_sha: "80123e3974ff"
 ---
 
 # Sync-Quellen einrichten { #configure-sync-sources }
 
 Sync-Quellen holen Dokumente aus externen Diensten (Google Drive, S3/MinIO, eine
-öffentliche Website, ein Git-Repository, eine SharePoint-Site oder ein OneDrive)
-selbsttätig in Knowledge-Collections. Jede Quelle speichert
+öffentliche Website, ein Git-Repository, eine SharePoint-Site, ein OneDrive oder
+ein Ordner auf einem SFTP-Server) selbsttätig in Knowledge-Collections. Jede Quelle speichert
 einen Connector-Typ, eine Ziel-Collection, connector-spezifische Einstellungen,
 einen Sync-Modus, einen optionalen Zeitplan und die id des
 [Vault-Secrets](../secrets.md), das sie authentifiziert - eine Website braucht
@@ -37,9 +37,13 @@ Sync-Vorgangs fest.
 ### Verfügbare Connector-Typen auflisten { #list-available-connector-types }
 
 ```bash
-# Shows all registered connectors (e.g. gdrive, s3, git, sharepoint)
+# Lists the configured sources and the connector type of each
 uv run agenticos cmd rag-sources
 ```
+
+Welche Connector-Typen dieses Deployment hat (`gdrive`, `s3`, `web`, `git`,
+`sharepoint`, `sftp`), zeigt `GET /api/v1/rag/sync/connectors`, wie in [Beispiel:
+verfügbare Connectoren ermitteln](#example-discover-available-connectors).
 
 ### Eine Google-Drive-Quelle anlegen -- Sync alle 2 Stunden { #add-a-google-drive-source-sync-every-2-hours }
 
@@ -101,6 +105,23 @@ uv run agenticos cmd rag-source-add \
 `--secret-id` ist die Microsoft-Entra-App im Vault der Organisation — siehe
 [SharePoint und OneDrive einrichten](#sharepoint-and-onedrive-setup).
 
+### Eine SFTP-Quelle anlegen -- ein Ordner, jede Nacht { #add-an-sftp-source-one-folder-nightly }
+
+```bash
+uv run agenticos cmd rag-source-add \
+  --name "Partner reports" \
+  --type sftp \
+  --org 0c8f2b1e-... \
+  --collection partner-reports \
+  --secret-id <vault-secret-id> \
+  --config '{"host": "sftp.example.com", "root_path": "/outgoing", "host_key": "ssh-ed25519 AAAAC3Nz..."}' \
+  --sync-mode new_only \
+  --schedule 1440
+```
+
+`--secret-id` ist der SSH-Login im Vault der Organisation, und `host_key` ist der
+öffentliche Host-Key des Servers — siehe [SFTP einrichten](#sftp-setup).
+
 ### Einen Sync von Hand auslösen { #trigger-sync-manually }
 
 ```bash
@@ -125,7 +146,7 @@ in der Auflistung von `rag-sources` steht.
 1. Öffnen Sie **Knowledge Base** und dort den Tab **Sync**.
 2. Klicken Sie auf **"+ Add Source"**.
 3. Wählen Sie einen Connector-Typ (Google Drive, S3, Website, Git
-   repository, SharePoint & OneDrive). Die Formularfelder
+   repository, SharePoint & OneDrive, SFTP server). Die Formularfelder
    werden aus dem JSON Schema des `CONFIG_MODEL` des Connectors erzeugt. Eine
    Website hat keinen Credential-Schritt.
 4. Füllen Sie die connector-spezifischen Konfigurationsfelder aus (etwa Folder-ID,
@@ -194,8 +215,11 @@ Ein Sync nach dem ersten tut so wenig, wie die Quelle es zulässt:
   also wird sie als `skipped` gezählt und weder erneut geparst noch eingebettet.
   Ein Connector, der für jede Datei eine Revision meldet, spart auch den Download.
   S3 meldet das `ETag` jedes Objekts, also überspringen `new_only` und
-  `update_only` ein Objekt mit unverändertem `ETag` vor dem Download. `full` lädt
-  jede Datei herunter.
+  `update_only` ein Objekt mit unverändertem `ETag` vor dem Download. Ein
+  SFTP-Server meldet Größe und Änderungszeit jeder Datei, also überspringen
+  dieselben Modi eine Datei, deren Größe und Zeit unverändert sind. Diese Revision
+  übersieht eine Bearbeitung, die beide beibehält. `full` lädt jede Datei herunter
+  und liest auch eine solche Bearbeitung.
 - **Eine unveränderte Quelle kostet eine Anfrage.** Ein Connector, der sagen
   kann, auf welchem Stand sein gesamter Inhalt ist — der Head-Commit eines
   Git-Branches, der Änderungsfeed einer SharePoint-Bibliothek —, hält diesen Stand nach jedem Lauf fest, der ohne
@@ -563,7 +587,7 @@ ersetzen Sie den Wert im selben Vault-Secret. Jede Quelle, die es nutzt,
 | `library` | string | Nein | die Standardbibliothek der Site | Der Name der Bibliothek, wie SharePoint ihn anzeigt, etwa `Documents`. Ein OneDrive hat nur seine Standardbibliothek. |
 | `folder_path` | string | Nein | -- | Ein Ordner innerhalb der Bibliothek, etwa `Policies/HR`. Für die ganze Bibliothek leer lassen. |
 | `include_subfolders` | boolean | Nein | `true` | Ob die Ordner unterhalb von `folder_path` gelesen werden. |
-| `extensions` | list of strings | Nein | `.pdf`, `.docx`, `.md`, `.txt` | Welche Dateitypen aufgenommen werden. Ergänzen Sie `.pptx`, `.xlsx` oder einen anderen Typ nur, wenn der Parser der Collection ihn liest: Eine Datei, die der Parser nicht lesen kann, zählt bei jedem Sync als fehlgeschlagene Datei. |
+| `extensions` | list of strings | Nein | `.pdf`, `.docx`, `.md`, `.txt` | Welche Dateitypen aufgenommen werden, höchstens 100, jeder höchstens 16 Zeichen lang. Ergänzen Sie `.pptx`, `.xlsx` oder einen anderen Typ nur, wenn der Parser der Collection ihn liest: Eine Datei, die der Parser nicht lesen kann, zählt bei jedem Sync als fehlgeschlagene Datei. |
 
 Jede Datei ist ein Dokument mit der Adresse `sharepoint://<drive-id>/<item-id>`.
 Die Adresse folgt der Datei, nicht ihrem Pfad, sodass eine Datei, die innerhalb
@@ -609,6 +633,431 @@ der Bearbeiter einer Quelle eintippt, wird zu einer Adresse, mit der sich der
 Worker verbindet: Die Site-URL ist nur ein Name, den Graph nachschlägt. Die
 nationalen Clouds von Microsoft, etwa US Government und China, nutzen andere Hosts
 und werden nicht unterstützt.
+
+## SFTP einrichten { #sftp-setup }
+
+Eine `sftp`-Quelle liest einen Ordnerbaum auf einem SFTP-Server über SSH, etwa den
+Ablageordner eines Partners oder einen Dateiserver. Sie meldet sich mit einem
+SSH-Login aus dem Vault an. Sie vertraut nur dem Host-Key in ihren eigenen
+Einstellungen und liest nichts von der eigenen SSH-Einrichtung des Workers.
+
+### 1. Den Host-Key des Servers beschaffen { #1-get-the-servers-host-key }
+
+Der Host-Key ist der einzige Beweis dafür, dass der Worker mit dem Server spricht,
+den die Quelle nennt. Holen Sie ihn beim Administrator des Servers ein. Oder lesen
+Sie ihn selbst vom Server und vergleichen Sie seinen Fingerabdruck mit dem des
+Administrators:
+
+```bash
+ssh-keyscan -t ed25519 -p 22 sftp.example.com > host_key.txt
+ssh-keygen -lf host_key.txt
+```
+
+`ssh-keyscan` liest den Schlüssel über das Netzwerk und kann deshalb nicht
+beweisen, dass der Schlüssel der des Servers ist. `ssh-keygen -lf` gibt den
+`SHA256:`-Fingerabdruck des Schlüssels aus. Der Administrator liest denselben
+Fingerabdruck auf dem Server mit
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Stimmen die beiden nicht
+überein, verwenden Sie den Schlüssel nicht.
+
+`ssh-keyscan` schreibt den Hostnamen vor den Schlüssel. Die Quelle braucht nur den
+Schlüsseltyp und den Schlüssel:
+
+```bash
+cut -d' ' -f2- host_key.txt
+```
+
+Der Connector pinnt einen Schlüssel vom Typ `ssh-ed25519`, `ssh-ed448`,
+`ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` oder `ssh-rsa`.
+Für einen Server ohne Ed25519-Schlüssel verwenden Sie `-t ecdsa` oder `-t rsa`. Der
+Worker fragt den Server nur nach einem Schlüssel des gepinnten Typs. Ein Server mit
+Schlüsseln mehrerer Typen antwortet mit dem Schlüssel dieses Typs.
+
+Ein Server ohne Schlüssel des gepinnten Typs beendet den ersten Sync, während die
+Verbindung aufgebaut wird. Der Satz im Sync-Protokoll hängt vom Server ab: [die
+Verbindung ging verloren](#sftp-the-connection-to-was-lost), [der Server hat die
+Verbindung geschlossen](#sftp-closed-the-connection) oder [die beiden konnten sich
+nicht einigen](#sftp-and-this-worker-could-not-agree-on-a-host-key-or-a-cipher).
+Prüfen Sie bei jedem der drei zuerst den Schlüsseltyp.
+
+### 2. Einen SSH-Login im Vault ablegen { #2-add-an-ssh-login-to-the-vault }
+
+**Die Reichweite des Kontos ist die Reichweite der Quelle.** Alles, was die Quelle
+aufnimmt, wird für jeden durchsuchbar, der die Collection lesen kann, die sie
+speist. Bitten Sie den Administrator um ein Konto, das nur den Ordner lesen kann,
+den die Quelle liest. Siehe [wer am Ende lesen kann, was eine Quelle aufgenommen
+hat](../file-processing.md#who-ends-up-able-to-read-what-a-source-ingested).
+
+Bitten Sie den Administrator außerdem, das Konto in einem Ordner einzuschließen,
+der nur enthält, was synchronisiert werden darf: `ChrootDirectory` bei OpenSSH,
+`DefaultRoot` bei ProFTPD. Das ist auf jedem Server notwendig, weil ein Link, der
+in den Ordner gelegt wird, den Sync eine andere Datei lesen lassen kann, die das
+Konto lesen kann. Ein chroot, der auch andere Dateien enthält, legt diese trotzdem
+offen. Siehe [was ein SFTP-Sync überträgt](#4-what-an-sftp-sync-transfers).
+
+Ziehen Sie einen Schlüssel einem Passwort vor, und ziehen Sie einen
+Ed25519-Schlüssel vor. Erzeugen Sie ein Schlüsselpaar für die Quelle:
+
+```bash
+ssh-keygen -t ed25519 -C agenticos-sync -f agenticos_sync
+```
+
+Nimmt der Server keinen Ed25519-Schlüssel an, erzeugen Sie stattdessen einen
+ECDSA-Schlüssel. Apache MINA SSHD ohne seine EdDSA-Bibliothek ist ein solcher
+Server.
+
+```bash
+ssh-keygen -t ecdsa -b 256 -C agenticos-sync -f agenticos_sync
+```
+
+Der Administrator fügt `agenticos_sync.pub` zu den `authorized_keys` des Kontos
+hinzu. Der private Schlüssel, `agenticos_sync`, kommt in den Vault.
+
+Legen Sie den Login im Vault für den Dienst **SFTP server** als **SSH login** ab:
+
+- **User name**: das Konto auf dem Server.
+- **Host**: wo der Login verwendet werden darf, etwa `sftp.example.com`. Für einen
+  anderen Port als 22 ergänzen Sie den Port: `sftp.example.com:2222`. Schreiben
+  Sie eine IPv6-Adresse in eckigen Klammern, etwa `[2001:db8::7]:2222`. Der Vault
+  speichert den Host so, wie eine Quelle ihn schreibt: in Kleinbuchstaben, ohne
+  abschließenden Punkt, eine IPv6-Adresse in ihrer Kurzform und einen Namen mit
+  Nicht-ASCII-Buchstaben in seiner kodierten Form, etwa `xn--bcher-kva.example`
+  für `bücher.example`. Ein Name darf einen Unterstrich enthalten, etwa
+  `sftp_server`. Der Host eines Git-Zugriffstokens darf das nicht.
+- **Private key**: die ganze Schlüsseldatei, im Format OpenSSH, PKCS#8 oder
+  PKCS#1, höchstens 16.384 Zeichen. Ist der Schlüssel verschlüsselt, geben Sie
+  auch seine **Key passphrase** an, höchstens 1.024 Zeichen. Ein RSA-Schlüssel darf höchstens 4096 Bit haben, und seine zwei Primzahlen
+  müssen gleich groß sein, wie `ssh-keygen` sie erzeugt. Ein Schlüssel auf einem
+  Security Key (`sk-`) lässt sich nicht verwenden. Ein verschlüsselter
+  Schlüssel darf höchstens 128 bcrypt-Runden (OpenSSH) verlangen, oder 1.000.000
+  Iterationen und einen abgeleiteten Schlüssel von 64 Bytes (PKCS#8).
+  `ssh-keygen` verwendet 16 Runden.
+- **Password**: nur für einen Server, der keinen Schlüssel annimmt. Es muss
+  mindestens acht und höchstens 1.024 Zeichen lang sein. Ein Server, der ein Passwort nur über einen
+  keyboard-interactive Login annimmt, etwa PAM mit `PasswordAuthentication no`,
+  lehnt es ab. Der Worker beantwortet nie eine keyboard-interactive Abfrage,
+  verwenden Sie dort also einen Schlüssel.
+
+Ein Login enthält einen privaten Schlüssel oder ein Passwort, nie beides. Der Vault
+öffnet den Schlüssel mit seiner Passphrase, wenn Sie den Login speichern, sodass
+ein Schlüssel, der sich nicht öffnen lässt, sofort abgelehnt wird, nicht erst beim
+ersten Sync. Er öffnet den Schlüssel in einem eigenen Prozess, der höchstens 5
+Sekunden brauchen darf. Ein Ed25519-Schlüssel braucht Millisekunden. Ein
+RSA-Schlüssel mit 4096 Bit oder ein Schlüssel an den obigen Grenzen braucht
+weniger als zwei Sekunden. Wählen Sie den Login dann im Credential-Schritt der
+Quelle aus.
+
+**Der Host gehört zum Login, nicht zur Quelle.** Wer eine Quelle bearbeitet, tippt
+ihren Host ein, und der Connector sendet den Login nur an den Host und Port, für
+den er abgelegt wurde. Ein für `sftp.example.com` abgelegter Login wird nur auf
+Port 22 verwendet. Das Bearbeiten einer Quelle kann den Login der Organisation also
+nicht an einen anderen Server senden.
+
+!!! warning "Wer die Quelle bearbeitet, wählt auch den Host-Key, dem sie vertraut"
+
+    Ein Bearbeiter, der außerdem den Verkehr des Workers zum Host des Logins
+    abfangen kann, kann einen eigenen Schlüssel pinnen und ein Passwort empfangen.
+    Ein Login mit Schlüssel gibt den Schlüssel nicht preis: Der Server erhält nur
+    eine Signatur, die nur für seine eigene Session gültig ist. Das ist der Grund,
+    einen Schlüssel vorzuziehen.
+
+### 3. Konfigurationsfelder des SFTP-Connectors { #3-sftp-connector-config-fields }
+
+| Feld | Typ | Pflicht | Vorgabe | Beschreibung |
+|-------|------|----------|---------|-------------|
+| `host` | string | Ja | -- | Hostname oder IP-Adresse des Servers, etwa `sftp.example.com`. Nur der Host: ohne Schema, Benutzername, Port oder Pfad. |
+| `port` | integer | Nein | `22` | Der SSH-Port des Servers, `1` bis `65535`. |
+| `root_path` | string | Ja | -- | Der absolute Pfad des zu lesenden Ordners, etwa `/outgoing`. Es gibt keine Vorgabe: Auf einem Server, der das Konto nicht auf seinen Home-Ordner beschränkt, ist `/` das ganze Dateisystem. |
+| `host_key` | string | Ja | -- | Der öffentliche Host-Key des Servers, eine Zeile wie `ssh-ed25519 AAAA...`, aus [Schritt 1](#1-get-the-servers-host-key). Ein Kommentar nach dem Schlüssel wird verworfen. |
+| `include_subfolders` | boolean | Nein | `true` | Ob die Ordner unterhalb von `root_path` gelesen werden. |
+| `extensions` | list of strings | Nein | `.pdf`, `.docx`, `.md`, `.txt` | Welche Dateitypen aufgenommen werden, höchstens 100, jeder höchstens 16 Zeichen lang. Ergänzen Sie `.pptx`, `.xlsx` oder einen anderen Typ nur, wenn der Parser der Collection ihn liest: Eine Datei, die der Parser nicht lesen kann, zählt bei jedem Sync als fehlgeschlagene Datei. |
+
+Das Formular zeigt diese Felder als **Host**, **Port**, **Folder**, **Host key**,
+**Include subfolders** und **File types**. Der Connector schreibt jeden Ordner in
+einer einheitlichen Form: `/outgoing//2026/` und `/outgoing/./2026` werden beide
+zu `/outgoing/2026`. Ein Ordner mit `..` darin wird abgelehnt.
+
+Jede Datei ist ein Dokument mit der Adresse `sftp://<user>@<host>:<port><path>`,
+etwa `sftp://sync@sftp.example.com:22/outgoing/2026/report.pdf`. Der Benutzername
+kommt aus dem Login und wird prozentkodiert. Der Pfad ist der volle Pfad der Datei
+auf dem Server. So behalten zwei Konten auf einem Server getrennte Dokumente, und
+eine Quelle, die auf einen engeren Ordner umgestellt wird, behält die Dokumente,
+die sie noch auflistet. Ein Login, der auf einen anderen Benutzernamen geändert
+wird, oder eine Quelle, die auf einen anderen Host oder Port umgestellt wird,
+ändert jede Adresse. Der nächste Sync liest dann jede Datei erneut, und eine
+vollständige Auflistung entfernt die Dokumente unter den alten Adressen. Planen
+Sie einen Serverumzug mit diesen Kosten im Blick.
+
+### 4. Was ein SFTP-Sync überträgt { #4-what-an-sftp-sync-transfers }
+
+SFTP hat keinen Änderungsfeed, also listet jeder Sync den ganzen Ordnerbaum auf.
+Die Auflistung liefert für jede Datei Größe und Änderungszeit, in ganzen Sekunden.
+Dieses Paar ist die Revision der Datei, also überspringen `new_only` und
+`update_only` eine Datei, deren Größe und Zeit unverändert sind, vor dem Download.
+
+!!! warning "Eine Bearbeitung, die Größe und Zeit beibehält, wird übersehen"
+
+    `put -p` behält die Zeit bei, die die Datei beim Hochladenden hatte, ein
+    `SETSTAT` kann die Zeit zurücksetzen, und ein Neuschreiben mit derselben Größe
+    kann in dieselbe Sekunde fallen. Jedes davon ändert eine Datei und behält ihre
+    Revision bei, also überspringen `new_only` und `update_only` die Datei. Führen
+    Sie die Quelle im Modus `full` aus, um jede Datei erneut zu lesen. OpenSSH,
+    SFTPGo, ProFTPD und Apache MINA SSHD verhalten sich alle so.
+
+Ein Download liest die Datei in Anfragen zu 255 KiB, eine nach der anderen, sodass
+eine Datei von 50 MB etwa 200 Roundtrips kostet. Der Connector vergleicht die
+Stat-Werte der Datei vor und nach dem Lesen. Eine Datei, die sich während des
+Lesens geändert hat oder ersetzt wurde oder nach der Auflistung gelöscht wurde,
+wird als `skipped` gezählt. Der nächste Sync liest ihre neue Version oder entfernt
+ihr Dokument.
+
+Ein Upload, der noch läuft, ändert die Datei meist während des Lesens, sodass der
+Sync die Datei überspringt. Kommt während des Lesens kein Byte an, kann der Sync
+den bereits angekommenen Teil aufnehmen, und der nächste Sync liest die
+vollständige Datei. Ein Upload unter einem temporären Namen, der nach Abschluss
+umbenannt wird, wird nie teilweise gelesen, wenn der temporäre Name einen Typ hat,
+der nicht in **File types** steht, etwa `.part` oder `.filepart`.
+
+Eine Datei über der Dokumentgrenze der Wissensbasis (`MAX_UPLOAD_SIZE_MB`,
+standardmäßig 50 MB) wird nicht heruntergeladen. Sie zählt bei jedem Sync als
+fehlgeschlagene Datei und bleibt so sichtbar. Der Connector zählt außerdem die
+Bytes während des Lesens, sodass ein Server, der mehr sendet, als seine Stat-Werte
+angaben, die Grenze nicht überschreiten kann.
+
+Die Auflistung lässt diese Einträge aus:
+
+- **Links und Spezialdateien.** Die Auflistung listet nie einen symbolischen Link
+  auf, egal worauf er zeigt, sodass der Sync keine Schleife durchläuft. Ein FIFO,
+  ein Socket oder ein Gerät wird ebenfalls nicht aufgelistet. Ein Link kann
+  trotzdem eine aufgelistete Datei oder einen Ordner nach der Auflistung ersetzen:
+  siehe die Warnung unten.
+- **Namen, die keine Adresse sein können.** Ein Name, der leer ist, `/` oder ein
+  NUL-Byte enthält, länger als 255 Bytes ist oder kein UTF-8 ist, wird
+  ausgelassen. Ebenso ein Name, dessen Pfad länger als 4.096 Bytes ist. Das
+  Sync-Protokoll nennt den Ordner, und die Auflistung bleibt vollständig.
+- **Einträge unbekannten Typs.** Ein Eintrag, dessen Typ der Server nicht angibt,
+  wird ausgelassen. Die Auflistung ist dann unvollständig, also entfernt dieser
+  Lauf nichts.
+- **Ordner, die der Server nicht auflistet.** Ein Ordner unterhalb von
+  `root_path`, dessen Auflistung der Server verweigert, meist mangels
+  Berechtigung, oder auf den er so antwortet, dass der Worker die Antwort nicht
+  dekodieren kann, wird im Sync-Protokoll und im Worker-Log genannt. Dieser Lauf
+  entfernt nichts.
+
+!!! warning "Ein Link im Ordner kann den Sync eine andere Datei lesen lassen"
+
+    SFTP Version 3 kann keinen Pfad öffnen, ohne einem Link zu folgen, und kein
+    getesteter Server bietet einen Weg daran vorbei. Wer im Ordner schreiben kann,
+    kann eine aufgelistete Datei nach der Auflistung durch einen Link ersetzen.
+    Der Download liest dann das Ziel des Links, wenn das Konto es lesen kann, und
+    der Sync nimmt es als die aufgelistete Datei auf.
+
+    Dieses Wettrennen gibt es auf jedem Server. Wo der Stat des Servers einen Link
+    als Link meldet, wie bei OpenSSH, SFTPGo und Apache MINA SSHD, muss der Link
+    in den wenigen Anfragen vor dem Download eingesetzt und vor dem Ende des
+    Downloads wieder entfernt werden. Die gespeicherte Revision ist dann die der
+    aufgelisteten Datei, sodass `new_only` und `update_only` den falschen Inhalt
+    behalten, bis sich die aufgelistete Datei ändert. Bei ProFTPD, dessen Stat
+    Links folgt, reicht das Fenster von der Auflistung bis zum Download, und der
+    Link kann bleiben.
+
+    Ein Ordner lässt sich auf dieselbe Weise ersetzen, auf jedem Server, und
+    dieser Link kann bleiben. Ein Stat eines Pfads folgt einem Link in jedem
+    Ordner des Pfads und prüft nur den letzten Namen. Ersetzt jemand einen Ordner
+    durch einen Link, nachdem der Sync den Ordner darüber aufgelistet hat, listet
+    der Sync an seiner Stelle das Ziel des Links auf und nimmt diese Dateien unter
+    dem Pfad des Ordners auf. Keine Prüfung des Connectors bemerkt das.
+
+    Die Abhilfe liegt auf dem Server:
+
+    - Das Konto kann nur lesen, was synchronisiert werden darf: ein chroot, dessen
+      Inhalt der synchronisierte Baum ist (`ChrootDirectory` mit
+      `ForceCommand internal-sftp` bei OpenSSH, `DefaultRoot` bei ProFTPD), oder
+      ein Konto, dessen Berechtigungen nur diesen Baum erreichen. Ein chroot, der
+      auch andere Dateien enthält, legt diese über einen Link trotzdem offen. Bei
+      Apache MINA SSHD hält ein virtuelles Root einen Link nicht auf, schließen
+      Sie das Konto also im Betriebssystem ein. SFTPGo lehnt einen Link ab, der
+      aus dem Root des Benutzers hinauszeigt.
+    - Die Konten, die hochladen, können weder Links noch Hardlinks anlegen:
+      `internal-sftp -P symlink,hardlink` bei OpenSSH, `<Limit SYMLINK> DenyAll`
+      und `SFTPExtensions -hardlink` bei ProFTPD und keine Berechtigung
+      `create_symlinks` bei SFTPGo. Bei ProFTPD hält `<Limit SYMLINK>` allein
+      einen Hardlink nicht auf.
+    - Ein Hardlink kommt an jeder Prüfung und an einem chroot vorbei. Die
+      Linux-Einstellung `fs.protected_hardlinks=1`, auf gängigen Distributionen
+      die Vorgabe, hindert einen Benutzer daran, eine Datei zu verlinken, die ihm
+      nicht gehört und die er nicht lesen und schreiben kann.
+
+    Der Connector prüft außerdem, ob die geöffnete Datei die aufgelistete ist.
+    Besitzer und Gruppe müssen denen der Auflistung entsprechen. Die
+    Berechtigungen müssen denen des Stats direkt vor dem Öffnen entsprechen und
+    zusätzlich denen der Auflistung, wenn dieser Stat eine andere Größe oder
+    Änderungszeit angibt als die Auflistung. Die Berechtigungen einer Auflistung
+    lassen sich fälschen, wie es `DirFakeMode` von ProFTPD tut, sodass eine
+    unveränderte Datei dort trotzdem gelesen wird. Eine Datei, die sich auf einem
+    solchen Server wirklich geändert hat, schlägt einmal fehl, und der nächste
+    Sync liest sie.
+
+    Das ist eine zusätzliche Schutzschicht, keine Abhilfe, und sie deckt nur eine
+    ersetzte Datei ab. Bei OpenSSH und ProFTPD erkennt sie einen Tausch gegen
+    eine Datei mit anderem Besitzer, anderer Gruppe oder anderen Berechtigungen,
+    und die Datei schlägt mit "The server opened a file for … that is not the
+    file it listed. …" fehl.
+
+    Bei Apache MINA SSHD und SFTPGo, die diese Prüfung anhand des Pfads
+    beantworten, bewirkt sie nichts. Sie übersieht außerdem einen Hardlink, ein
+    Ziel mit demselben Besitzer, derselben Gruppe und denselben Berechtigungen und
+    einen Ordner, der durch einen Link ersetzt wurde, bevor der Sync ihn
+    aufgelistet hat. Bei ProFTPD übersieht sie einen Link, der vor dem Stat
+    eingesetzt wurde und auf eine Datei mit dem aufgelisteten Besitzer, der
+    aufgelisteten Gruppe, Größe und Änderungszeit zeigt.
+
+Das Worker-Log ist die Ausgabe des Worker-Prozesses. In einem Compose-Deployment
+lesen Sie es mit `docker compose logs worker`. Es enthält die eigene Antwort des
+Servers, die das Sync-Protokoll nie zeigt, und den Grund, aus dem eine Datei
+fehlgeschlagen ist.
+
+Jeder Satz, den die Auflistung dem Sync-Protokoll hinzufügt, zählt als
+fehlgeschlagene Datei. Der Lauf hat also den Status `error`, bis die Ursache auf
+dem Server behoben ist oder ein engerer Ordner sie ausschließt. Das Sync-Protokoll
+zeigt höchstens drei Hinweise und zählt die übrigen als "And … more.". Beheben Sie
+die angezeigten Ursachen und synchronisieren Sie erneut, um die nächsten zu sehen.
+
+Ein Steuerzeichen in einem Datei- oder Ordnernamen, etwa ein Zeilenumbruch oder
+ein Unicode-Zeilen- oder -Absatztrenner (U+2028, U+2029), erscheint im
+Sync-Protokoll und in den eigenen Sätzen des Connectors im Worker-Log als `?`. Die
+Datei wird trotzdem unter ihrem eigenen Namen synchronisiert. Die Zeile
+`Failed to sync …` des Workers zeigt den Namen so, wie der Log-Filter ihn
+maskiert, etwa `\n` für einen Zeilenumbruch.
+
+Ein Sync verwendet eine Verbindung für die Auflistung und jeden Download. Der
+Worker sendet alle 30 Sekunden ein Keepalive, und ein Server, der drei verpasst,
+gilt als nicht mehr erreichbar. Eine Verbindung oder eine SFTP-Session, die der
+Server zwischen zwei Dateien geschlossen hat, wird für die nächste Datei erneut
+geöffnet.
+
+Die Auflistung liest über diese Verbindung bis zu 4 Ordner gleichzeitig, mit etwa
+4 Roundtrips pro Ordner. Eine kleine Datei kostet dann etwa 7 Roundtrips: zwei
+Stats des Pfads, das Öffnen, zwei Stats der geöffneten Datei, ein Lesen und das
+Schließen. Bei 80 ms pro Roundtrip ist das etwa eine halbe Sekunde pro Datei, vor
+dem Parsen und dem Einbetten.
+
+Ein Sync darf 4 Stunden laufen, sodass ein erster Import eines großen Baums über
+eine langsame Verbindung mehr als einen Lauf brauchen kann. Jeder Lauf behält, was
+die Läufe davor aufgenommen haben, und `new_only` und `update_only` überspringen
+diese Dateien vor dem Download, sodass der nächste Lauf dort weitermacht, wo der
+letzte aufgehört hat.
+
+Ein fehlgeschlagener Verbindungsaufbau wird im selben Sync nicht erneut versucht.
+Das gilt für einen abgelehnten Login, eine Zeitüberschreitung und eine Verbindung,
+die verloren ging, bevor die SFTP-Session begann. Jede Datei danach schlägt mit
+demselben Satz fehl, und es wird kein zweiter Login gesendet. Ein geändertes
+Passwort kostet also einen abgelehnten Login pro Sync, nicht einen pro Datei.
+Jeder Sync sendet trotzdem einen, sodass ein kurzer Zeitplan oder wiederholte
+manuelle Syncs das Sperrlimit des Servers erreichen können. Wird der Login
+abgelehnt, korrigieren Sie ihn oder halten Sie die Quelle an.
+
+!!! warning "Ein falscher Login kann auf einem OpenSSH-Server die anderen Quellen stoppen"
+
+    OpenSSH 9.8 und neuer lehnt Verbindungen von einer Adresse eine Zeit lang ab,
+    nachdem von ihr aus Logins fehlgeschlagen sind (`PerSourcePenalties`,
+    standardmäßig aktiv). Alle Quellen eines Deployments verbinden sich meist von
+    einer einzigen Adresse aus, der Adresse der Worker. Eine Quelle mit falschem
+    Passwort kann also die Syncs anderer Quellen auf demselben Server mit [die
+    Verbindung ging verloren](#sftp-the-connection-to-was-lost) fehlschlagen
+    lassen, obwohl deren eigene Logins richtig sind.
+
+### Was einen SFTP-Sync begrenzt { #what-bounds-an-sftp-sync }
+
+Feste Grenzen schützen den Worker vor einem defekten oder feindseligen Server. Sie
+sind keine Einstellungen. Eine Auflistung, die eine der ersten sechs erreicht, hält
+vorzeitig an, nennt die Grenze im Sync-Protokoll und entfernt nichts. Wählen Sie einen
+engeren Ordner, bis ein Sync ohne die Meldung endet.
+
+| Grenze | Wert | Wenn sie erreicht wird |
+|---|---|---|
+| Ordnerebenen unterhalb von `root_path` | 32 | Die Auflistung hält an |
+| Ordner in der Auflistung | 10.000 | Die Ordner darüber hinaus werden nicht gelesen |
+| Namen in der Auflistung, `.` und `..` eingeschlossen | 1.000.000 | Die Auflistung hält an |
+| Dateien der konfigurierten Typen in der Auflistung | 100.000 | Die Auflistung hält an |
+| Der Speicher, den die Pfade der aufgelisteten Dateien belegen | 64 MB, etwa ein Byte pro Zeichen bei einem ASCII-Pfad und bis zu vier bei anderen Zeichen | Die Auflistung hält an |
+| Die ganze Auflistung | 30 Minuten | Die Auflistung hält an |
+| Ein Name und ein Pfad | 255 Bytes und 4.096 Bytes | Der Name wird ausgelassen |
+| Verbindungsaufbau und Login | 30 Sekunden | Der Verbindungsaufbau schlägt fehl |
+| Eine SFTP-Anfrage | 30 Sekunden | Der Worker trennt die Verbindung. Eine Anfrage der Auflistung lässt den Sync fehlschlagen, eine Anfrage eines Downloads lässt diese Datei fehlschlagen |
+| Der Download einer Datei | 10 Minuten | Die Datei schlägt fehl |
+| Die Größe einer Datei | `MAX_UPLOAD_SIZE_MB`, standardmäßig 50 MB | Die Datei schlägt fehl |
+
+### SFTP-Netzwerkregeln { #sftp-network-rules }
+
+Der Host der Quelle wird aufgelöst und geprüft wie jede andere Adresse, die ein
+Mandant wählt. Ein Host, der auf eine private, Loopback-, Link-Local-, CGNAT- oder
+reservierte Adresse auflöst, wird beim Speichern der Quelle abgelehnt und beim Sync
+erneut. Der Worker verbindet sich dann nur mit den Adressen, die die Prüfung
+bestanden haben, und löst den Namen nie ein zweites Mal auf.
+
+Ein Dateiserver im Firmennetz hat eine private Adresse. Ein Betreiber kann ihn in
+`SYNC_ALLOWED_HOSTS` eintragen (siehe
+[Projekteinstellungen](../configuration.md#project-settings)). Setzen Sie die
+Liste für die API und für den Worker. Die API löst den Host auf und prüft ihn,
+wenn eine Quelle gespeichert wird, und der Worker tut es erneut, wenn die Quelle
+synchronisiert, also müssen auch beide den Namen auflösen können.
+
+Ein gelisteter Host darf auf eine private oder CGNAT-Adresse auflösen. Er darf nie auf eine Loopback-,
+Link-Local-, Multicast- oder Cloud-Metadaten-Adresse auflösen. Die Liste gilt für
+das ganze Deployment: Die Quellen jeder Organisation erreichen jeden Port eines
+gelisteten Hosts. Nur SFTP-Quellen lesen die Liste. Git- und Website-Quellen
+behalten die einfache Adressprüfung.
+
+Schreiben Sie jeden Eintrag wie den **Host** einer Quelle: nur einen Namen oder
+eine IP-Adresse. Die Liste vergleicht den Host, den die Quelle eintippt, nicht die
+Adresse, auf die er auflöst. Für eine Quelle, deren **Host** `files.corp.example`
+ist, listen Sie `files.corp.example`: Ihre Adresse `10.0.0.5` allein lässt sie
+nicht zu. Ein Eintrag mit einem Port, einem Schema, einem Pfad, einem
+Bereich, einem Platzhalter oder einem abschließenden Punkt verhindert, dass die
+Einstellungen geladen werden, und der Startfehler nennt den Eintrag. Ebenso ein
+Eintrag, der als Loopback-, Link-Local- oder Metadaten-Host gelesen wird, sobald
+er wie der Host einer Quelle vereinheitlicht ist, etwa `localhost` in Buchstaben
+voller Breite.
+
+Jede Organisation kann einen eigenen Login für einen gelisteten Host ablegen und
+ihn dort versuchen. Eine Organisation ohne gültigen Login erfährt trotzdem, ob der
+Host auf SSH antwortet und ob sein Host-Key passt. Listen Sie also nur einen
+Server, dessen Konten die Zugriffskontrolle sind.
+
+Der Worker verbindet sich direkt mit dem SSH-Port des Servers. Ein HTTP-Proxy wie
+`HTTPS_PROXY` gilt dafür nicht.
+
+Der Worker liest nichts von seiner eigenen SSH-Einrichtung:
+
+- `~/.ssh/config`, `~/.ssh/known_hosts` und die Schlüssel in `~/.ssh`
+- einen SSH-Agent unter `SSH_AUTH_SOCK`
+- ein Kerberos-Ticket, dessen Schlüsselaustausch die Prüfung des Host-Keys
+  überspringt
+
+Der gepinnte Schlüssel ist der einzige Host-Key, dem der Worker vertraut. Der
+Worker versucht nur die eine Login-Methode, die der Vault-Login enthält, und nie
+keyboard-interactive. Ein Server, der den Worker ohne Login hereinlässt, wird
+abgelehnt, weil dieser Server nichts geprüft hat.
+
+Kompression ist abgeschaltet. asyncssh begrenzt nicht, auf welche Größe sich ein
+komprimiertes Paket entpackt, sodass ein Server den Worker für jedes Paket
+Hunderte Megabytes belegen lassen könnte. Ein Server, der nur komprimierte
+Verbindungen anbietet, wird mit [dem Satz zum
+Schlüsselaustausch](#sftp-and-this-worker-could-not-agree-on-a-host-key-or-a-cipher)
+abgelehnt.
+
+!!! note "Ein Worker braucht einen lokalen Benutzernamen"
+
+    asyncssh ruft bei jedem Verbindungsaufbau `getpass.getuser()` auf, und nichts
+    schaltet das ab. Der Name wird nicht gesendet. Das mitgelieferte Image hat
+    einen passwd-Eintrag für seinen Benutzer. Ein Worker, der als Benutzer ohne
+    passwd-Eintrag läuft, braucht die Variable `LOGNAME`. Das gilt für ein eigenes
+    Image und für das mitgelieferte Image, wenn es mit einer anderen User-ID
+    gestartet wird, etwa mit `docker run --user` oder einem Kubernetes-`runAsUser`.
+    Ohne sie schlägt jeder SFTP-Sync fehl, und das Sync-Protokoll zeigt "The sync
+    did not finish (OSError) - check the source's credential, then run it again.
+    …". Das Credential ist nicht die Ursache.
 
 ## API-Referenz { #api-reference }
 
@@ -763,6 +1212,7 @@ Google Drive (`gdrive`) ist verfügbar.
 S3 (`s3`) ist verfügbar.
 Website (`web`) ist verfügbar.
 Git (`git`) ist verfügbar.
+SFTP (`sftp`) ist verfügbar.
 
 ### Google Drive: "this source has no credential" { #google-drive-this-source-has-no-credential }
 
@@ -834,11 +1284,12 @@ nichts entfernt, weil die Seiten dahinter nicht gesehen wurden.
 ### "The source could not be listed completely, so documents it may no longer hold were kept" { #the-source-could-not-be-listed-completely-so-documents-it-may-no-longer-hold-were-kept }
 
 Die Auflistung brach vorzeitig ab: Ein Crawl erreichte `max_pages`, einige
-Seiten konnten nicht gelesen werden, oder ein SharePoint-Ordner ließ sich nicht
-auflisten. Was gefunden wurde, ist aufgenommen, und nichts wurde entfernt. Bei
-einer Website erhöhen Sie `max_pages` oder grenzen den Crawl mit `path_prefix`
-ein, bis ein Lauf ohne diese Meldung endet. Bei SharePoint siehe den Eintrag für
-diesen Ordner weiter unten.
+Seiten konnten nicht gelesen werden, ein SharePoint-Ordner ließ sich nicht
+auflisten, oder eine SFTP-Auflistung erreichte eine Grenze oder konnte einen
+Ordner oder einen Eintrag nicht lesen. Was gefunden wurde, ist aufgenommen, und
+nichts wurde entfernt. Bei einer Website erhöhen Sie `max_pages` oder grenzen den
+Crawl mit `path_prefix` ein, bis ein Lauf ohne diese Meldung endet. Bei SharePoint
+und SFTP siehe die Einträge zur Auflistung weiter unten.
 
 ### Git: "The repository refused the source's token" { #git-the-repository-refused-the-sources-token }
 
@@ -976,6 +1427,478 @@ App als **Microsoft Entra app** im Vault ab und wählen Sie diese aus.
 In der Bibliothek hat sich seit dem letzten sauberen Lauf unter derselben
 Konfiguration nichts geändert, also gab es nichts zu tun. Stellen Sie die Quelle
 für einen Lauf auf `full`, um ungeachtet dessen wieder alles zu lesen.
+
+### SFTP: "Paste only the key type and the key, without the host name or the options in front of them." { #sftp-paste-only-the-key-type-and-the-key-without-the-host-name-or-the-options-in-front-of-them }
+
+**Host key** enthält eine Zeile aus `ssh-keyscan` oder `known_hosts` mit dem
+Hostnamen vor dem Schlüssel, oder eine `authorized_keys`-Zeile mit Optionen davor.
+Entfernen Sie das erste Feld. Für die Datei aus
+[Schritt 1](#1-get-the-servers-host-key) erledigt das
+`cut -d' ' -f2- host_key.txt`.
+
+### SFTP: "Paste the server's public host key as one line, with its type first, …" { #sftp-paste-the-servers-public-host-key-as-one-line-with-its-type-first }
+
+**Host key** enthält etwas anderes als eine Zeile mit einem öffentlichen Schlüssel:
+einen Fingerabdruck aus `ssh-keygen -lf`, zwei Zeilen, einen PEM-Block oder einen
+beschädigten Schlüssel. Fügen Sie den Schlüssel selbst ein, etwa
+`ssh-ed25519 AAAAC3Nz...`. Ein PEM-Block wird abgelehnt, bevor er gelesen wird,
+denn ein versehentlich eingefügter privater Schlüssel darf nicht gelesen werden.
+
+### SFTP: "The host key must be of type ssh-ed25519, ssh-ed448, …" { #sftp-the-host-key-must-be-of-type-ssh-ed25519-ssh-ed448 }
+
+Der Schlüssel hat einen Typ, den der Connector nicht pinnt, etwa `ssh-dss`, ein
+Host-Zertifikat oder ein Security Key. Holen Sie vom Server einen Schlüssel eines
+der genannten Typen, etwa mit `ssh-keyscan -t ed25519`, `-t ecdsa` oder `-t rsa`.
+
+### SFTP: "The host is a host name or an IP address alone, …" oder "Put the port in the Port field, …" { #sftp-the-host-is-a-host-name-or-an-ip-address-alone-or-put-the-port-in-the-port-field }
+
+**Host** enthält mehr als den Host, etwa `sftp://sftp.example.com/outgoing`,
+`sync@sftp.example.com` oder `sftp.example.com:2222`. Tippen Sie nur den Namen oder
+die Adresse ein. Tragen Sie den Port in **Port** ein und den Ordner in **Folder**.
+
+Ein abschließender Punkt wird ebenfalls abgelehnt: Entfernen Sie ihn. Ein Name
+enthält nur Buchstaben, Ziffern, Bindestriche, Unterstriche und Punkte, etwa
+`sftp_server` oder `files-01.corp.example`.
+
+### SFTP: ein Ordner oder ein Dateityp, der beim Speichern der Quelle abgelehnt wird { #sftp-a-folder-or-a-file-type-refused-when-the-source-is-saved }
+
+- "The folder is an absolute path on the server, e.g. /outgoing." **Folder**
+  beginnt nicht mit `/`. Schreiben Sie den vollen Pfad, wie das Konto ihn auf dem
+  Server sieht.
+- "The folder may not hold '..'. Name the folder itself." Schreiben Sie den eigenen
+  Pfad des Ordners, ohne `..`.
+- "The folder may not hold a line break or another control character." Entfernen
+  Sie das Zeichen. Beim Einfügen kann eines hineingeraten, auch ein Unicode-Zeilen-
+  oder -Absatztrenner (U+2028, U+2029).
+- "The folder may be at most 1024 characters long." Wählen Sie einen Ordner mit
+  einem kürzeren Pfad.
+- "'…' is not a file extension, e.g. .pdf." Ein Eintrag in **File types** besteht
+  nicht aus einem Punkt und 1 bis 10 Buchstaben oder Ziffern.
+- "At least one file type is needed." **File types** ist leer. Ergänzen Sie
+  mindestens einen Typ, etwa `.pdf`.
+- "At most 100 file types can be listed." **File types** hat mehr als 100
+  Einträge. Behalten Sie die Typen, die der Parser der Collection liest.
+- "A file type is at most 16 characters, e.g. .pdf." Ein Eintrag in **File types**
+  ist länger als 16 Zeichen. Schreiben Sie nur die Endung, etwa `.pdf`.
+
+Die **File types** einer SharePoint-Quelle liefern dieselben letzten vier Sätze.
+Die beiden Grenzen gelten, wenn eine Quelle gespeichert wird, und zählen die Typen,
+nachdem leere und doppelte Typen entfernt wurden. Eine Quelle, die mit mehr Typen
+gespeichert ist, synchronisiert weiter und wird erst abgelehnt, wenn sie erneut
+gespeichert wird.
+
+### SFTP: "Blocked: '…' resolves to private/internal address '…'. …" { #sftp-blocked-resolves-to-privateinternal-address }
+
+Der Host löst innerhalb des Netzwerks des Deployments auf. Ein Betreiber kann einen
+Dateiserver im Firmennetz in `SYNC_ALLOWED_HOSTS` eintragen, wie unter
+[SFTP-Netzwerkregeln](#sftp-network-rules) beschrieben. Ein Host, der auf eine
+Loopback-, Link-Local- oder Cloud-Metadaten-Adresse auflöst, bleibt abgelehnt, auch
+wenn er gelistet ist. Bei einem Host, der als IP-Adresse eingegeben wurde, lautet
+der Satz "Blocked: '…' resolves to a private/internal address. SSRF protection does
+not allow requests to internal networks." Ursache und Abhilfe sind dieselben.
+
+Listen Sie den Host so, wie die Quelle ihn nennt, nicht die Adresse aus dem Satz.
+Setzen Sie `SYNC_ALLOWED_HOSTS` für die API und für den Worker. Wird eine Quelle
+beim Speichern abgelehnt, fehlt ihr Host in der Liste der API. Wird sie erst beim
+Sync abgelehnt, fehlt er in der Liste des Workers.
+
+"Blocked: unable to resolve hostname …" bedeutet, dass der Host überhaupt nicht
+aufgelöst werden konnte. Prüfen Sie seine Schreibweise. Die API löst den Host
+beim Speichern der Quelle auf und der Worker beim Sync der Quelle, also müssen
+beide den Namen auflösen können.
+
+### "A credential does not go in a source's configuration" { #a-credential-does-not-go-in-a-sources-configuration }
+
+`config` enthält ein Feld, das ein Credential ist, etwa `password`, `private_key`
+oder `passphrase` bei einer SFTP-Quelle. Legen Sie das Credential im Vault ab und
+setzen Sie die `secret_id` der Quelle darauf.
+
+### SFTP: "An SSH login needs a private key or a password, and not both." { #sftp-an-ssh-login-needs-a-private-key-or-a-password-and-not-both }
+
+Der Login hat sowohl einen privaten Schlüssel als auch ein Passwort, oder keines
+von beiden. Geben Sie ihm eine Art, sich anzumelden: einen privaten Schlüssel, mit
+seiner Passphrase, falls er eine hat, oder ein Passwort. "A passphrase goes with a
+private key." bedeutet, dass der Login eine Passphrase und ein Passwort hat.
+Entfernen Sie die Passphrase.
+
+### SFTP: "The private key could not be read. …" { #sftp-the-private-key-could-not-be-read }
+
+Der Vault konnte den Schlüssel beim Speichern des Logins nicht lesen. Fügen Sie
+die ganze Schlüsseldatei ein, von ihrer `-----BEGIN`-Zeile bis zu ihrer
+`-----END`-Zeile. Ist der Schlüssel verschlüsselt, geben Sie auch seine Passphrase
+an. "The private key could not be read with this passphrase." bedeutet, dass die
+Passphrase falsch ist oder dass das Eingefügte kein Schlüssel ist, den der Vault
+liest.
+
+Die erste Zeile `-----BEGIN … PRIVATE KEY-----` muss eine von
+`OPENSSH PRIVATE KEY`, `PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, `RSA PRIVATE KEY`,
+`EC PRIVATE KEY` oder `DSA PRIVATE KEY` sein. Ein Schlüssel in binärer DER-Form
+wird abgelehnt, ebenso ein PKCS#8-Schlüssel unter einem PEM-Header
+`Proc-Type: 4,ENCRYPTED`. Exportieren Sie einen solchen Schlüssel erneut in einer
+dieser Formen. Einen Schlüssel, den `ssh-keygen` liest, schreibt
+`ssh-keygen -p -f <key file>` im OpenSSH-Format. Ein PuTTY-Schlüssel (`.ppk`)
+wird ebenfalls abgelehnt, und `ssh-keygen` kann ihn nicht lesen. Exportieren Sie
+ihn im OpenSSH-Format mit PuTTYgen (**Conversions** → **Export OpenSSH key**)
+oder mit `puttygen <key>.ppk -O private-openssh -o <key file>`.
+
+### SFTP: "The private key is encrypted with too many key derivation rounds. …" { #sftp-the-private-key-is-encrypted-with-too-many-key-derivation-rounds }
+
+Ein verschlüsselter Schlüssel gibt an, wie viel Arbeit die Prüfung seiner
+Passphrase kostet. Der Vault lehnt einen Schlüssel ab, der mehr als 128
+bcrypt-Runden (OpenSSH) verlangt, oder mehr als 1.000.000 Iterationen oder einen
+abgeleiteten Schlüssel von mehr als 64 Bytes (PKCS#8). Er liest das aus dem
+Schlüssel, bevor er irgendetwas entschlüsselt. Verschlüsseln Sie den Schlüssel
+erneut mit weniger Runden, etwa mit `ssh-keygen -p -a 16 -f <key file>`, und
+fügen Sie ihn erneut ein.
+
+### SFTP: "The private key takes too long to open. …" { #sftp-the-private-key-takes-too-long-to-open }
+
+Der vollständige Satz lautet "The private key takes too long to open. Use an
+Ed25519 key, or an RSA key of at most 4096 bits.". Der Vault öffnet jeden
+Schlüssel in einem eigenen Prozess und beendet ihn nach 5 Sekunden. Ein
+Schlüssel, dessen verschlüsselter Teil mehr Arbeit verlangt, als in diese Zeit
+passt, oder ein sehr ausgelasteter API-Host führt zu diesem Satz. Erzeugen Sie einen
+Ed25519-Schlüssel, wie in [Schritt 2](#2-add-an-ssh-login-to-the-vault)
+beschrieben, und speichern Sie den Login erneut.
+
+### SFTP: "The private key is an RSA key of more than 4096 bits. …" { #sftp-the-private-key-is-an-rsa-key-of-more-than-4096-bits }
+
+Der vollständige Satz lautet "The private key is an RSA key of more than 4096
+bits. Use an Ed25519 key, or an RSA key of at most 4096 bits.". Die Zeit für die
+Prüfung eines RSA-Schlüssels wächst schnell mit seiner Größe, deshalb lehnt der
+Vault einen Schlüssel über 4096 Bit ab, ohne ihn zu prüfen. Erzeugen Sie einen
+Ed25519-Schlüssel oder einen RSA-Schlüssel mit höchstens 4096 Bit, und fügen Sie
+seine öffentliche Hälfte zu den `authorized_keys` des Kontos hinzu.
+
+### SFTP: "The private key is an RSA key whose two primes are not of the same size. …" { #sftp-the-private-key-is-an-rsa-key-whose-two-primes-are-not-of-the-same-size }
+
+Der vollständige Satz lautet "The private key is an RSA key whose two primes are
+not of the same size. Use an Ed25519 key, or an RSA key that ssh-keygen made.".
+Der Vault lehnt einen RSA-Schlüssel, dessen zwei Primzahlen sich in der Größe um
+mehr als 16 Bit unterscheiden, ab, ohne ihn zu prüfen. `ssh-keygen` und OpenSSL
+erzeugen beide Primzahlen gleich groß, und die Prüfung eines Schlüssels mit einer
+großen Primzahl dauert lange. Erzeugen Sie mit `ssh-keygen` einen neuen
+Schlüssel, wie in [Schritt 2](#2-add-an-ssh-login-to-the-vault) beschrieben, und
+fügen Sie seine öffentliche Hälfte zu den `authorized_keys` des Kontos hinzu.
+
+### SFTP: "The private key is held on a security key, which a sync cannot use to log in. …" { #sftp-the-private-key-is-held-on-a-security-key-which-a-sync-cannot-use-to-log-in }
+
+Der vollständige Satz lautet "The private key is held on a security key, which a
+sync cannot use to log in. Use an Ed25519 key without a security key.". Die
+Schlüsseldatei ist ein `sk-`-Schlüssel: ein Verweis auf einen Hardware-Schlüssel,
+etwa einer, der mit `ssh-keygen -t ed25519-sk` erzeugt wurde. Der Worker hat
+keinen Hardware-Schlüssel, kann damit also nicht signieren. Erzeugen Sie einen
+Ed25519-Schlüssel mit `ssh-keygen -t ed25519`, wie in
+[Schritt 2](#2-add-an-ssh-login-to-the-vault) beschrieben.
+
+### SFTP: "Other private keys are being checked now. Try again in a moment." { #sftp-other-private-keys-are-being-checked-now-try-again-in-a-moment }
+
+Im selben API-Prozess werden bereits zwei private Schlüssel geprüft, und der Vault
+prüft höchstens zwei gleichzeitig. Das Speichern wird sofort abgelehnt, mit Status
+503 und dem Code `SERVICE_BUSY`, damit keine Anfrage wartet, während sie eine
+Datenbankverbindung hält. Speichern Sie den Login nach einigen Sekunden erneut.
+
+### SFTP: "The private key is too long. Paste only the key file, at most 16,384 characters." { #sftp-the-private-key-is-too-long-paste-only-the-key-file-at-most-16384-characters }
+
+Das Feld **Private key** enthält mehr als 16.384 Zeichen. Die Schlüsseldatei eines
+Ed25519-Schlüssels hat etwa 400 Zeichen, die eines RSA-Schlüssels mit 4096 Bit
+etwa 3.300. Das Eingefügte enthält also mehr als den Schlüssel, oder es ist kein
+Schlüssel. Fügen Sie nur die Datei des privaten Schlüssels ein, von ihrer
+`-----BEGIN`-Zeile bis zu ihrer `-----END`-Zeile.
+
+### SFTP: "The passphrase is too long: at most 1,024 characters." { #sftp-the-passphrase-is-too-long-at-most-1024-characters }
+
+Das Feld **Key passphrase** enthält mehr als 1.024 Zeichen. Fügen Sie nur die
+Passphrase ein, die den Schlüssel öffnet. Eine Passphrase, die tatsächlich länger
+ist, lässt sich nicht speichern: Verschlüsseln Sie den Schlüssel erneut mit einer
+kürzeren, mit `ssh-keygen -p -f <key file>`.
+
+### SFTP: "The password is too long: at most 1,024 characters." { #sftp-the-password-is-too-long-at-most-1024-characters }
+
+Das Feld **Password** enthält mehr als 1.024 Zeichen. Fügen Sie nur das Passwort
+ein. Für einen Server, dessen Passwort länger ist, verwenden Sie stattdessen einen
+Schlüssel, wie in [Schritt 2](#2-add-an-ssh-login-to-the-vault) beschrieben.
+
+### SFTP: "The private key could not be checked. Try again later." { #sftp-the-private-key-could-not-be-checked-try-again-later }
+
+Der Prozess, der den Schlüssel öffnet, endete mit einem Fehler und gab keine
+Antwort. Das sagt nichts über den Schlüssel aus. Die API antwortet mit Status 500.
+Speichern Sie den Login nach kurzer Zeit erneut. Schlägt es wieder fehl, enthält
+das API-Log die Zeile `ssh_key_check_failed`. Der Exit-Status des Prozesses steht
+im Feld `returncode` des Eintrags, das nur ein Log-Handler zeigt, der zusätzliche
+Felder anzeigt, etwa Logfire. Der API-Host muss einen Python-Prozess starten
+können, und dieser Prozess muss asyncssh importieren können.
+
+### SFTP: "The host is a host name or an IP address with an optional port, …" { #sftp-the-host-is-a-host-name-or-an-ip-address-with-an-optional-port }
+
+**Host** im Login ist nicht ein einzelner Host mit optionalem Port. Schreiben Sie
+einen Namen oder eine IP-Adresse, dann `:` und den Port, wenn er nicht 22 ist,
+etwa `sftp.example.com` oder `[2001:db8::7]:2222`. Eine IPv6-Adresse steht in
+eckigen Klammern. Ein Schema, ein Pfad, ein Platzhalter oder ein Leerzeichen wird
+abgelehnt. Ein Name enthält nur Buchstaben, Ziffern, Bindestriche, Unterstriche
+und Punkte.
+
+### SFTP: "This SFTP source has no credential. …" { #sftp-this-sftp-source-has-no-credential }
+
+Die `secret_id` der Quelle ist leer, der Login, den sie nannte, wurde gelöscht,
+oder der Worker konnte den Login nicht öffnen. Der Worker prüft die Form des
+Schlüssels jedes Mal, wenn er den Login öffnet, sodass auch ein gespeicherter
+Schlüssel, der diese Prüfung nicht mehr besteht, diesen Satz liefert. Das
+Worker-Log enthält dann `sync_source_secret_unusable`. Legen Sie einen SSH-Login im
+Vault ab, wie in [Schritt 2](#2-add-an-ssh-login-to-the-vault) beschrieben, oder
+speichern Sie den Schlüssel und seine Passphrase erneut im Login. Wählen Sie ihn
+dann im Credential-Schritt der Quelle aus.
+
+### SFTP: "An SFTP source needs an SSH login, and the credential it names is not one." { #sftp-an-sftp-source-needs-an-ssh-login-and-the-credential-it-names-is-not-one }
+
+Eine Quelle, die ein Credential einer anderen Art nennt, etwa einen API key, wird
+beim Speichern abgelehnt, mit "A SFTP server source needs a ssh_credentials
+credential, and that one is …". Das gilt für den Assistenten, die API und
+`rag-source-add`. Wählen Sie einen **SSH login**. Der Satz in der Überschrift ist
+die eigene Prüfung des Connectors zur Sync-Zeit, und eine Quelle, die mit einem
+SSH-Login gespeichert wurde, liefert ihn nicht.
+
+### SFTP: "This SSH login was added for …, and the source names …" { #sftp-this-ssh-login-was-added-for-and-the-source-names }
+
+Host oder Port der Quelle sind nicht die, für die der Login abgelegt wurde.
+Entweder ist **Host** oder **Port** falsch, oder die Quelle braucht einen Login,
+der für diesen Host abgelegt wurde. Ein Login, der ohne Port abgelegt wurde, wird
+nur auf Port 22 verwendet. An den Host der Quelle wurde nichts gesendet.
+
+### SFTP: "… did not prove that it holds the host key in this source's settings. …" { #sftp-did-not-prove-that-it-holds-the-host-key-in-this-sources-settings }
+
+Der Server antwortete mit einem anderen Host-Key als dem in **Host key**. Der
+Schlüssel des Servers hat sich geändert, etwa weil der Server neu installiert
+wurde, oder der Worker hat nicht den echten Server erreicht. Vergleichen Sie den
+Fingerabdruck erneut mit dem des Administrators, wie in
+[Schritt 1](#1-get-the-servers-host-key) beschrieben, bevor Sie den Schlüssel
+ändern. Es wurde kein Login gesendet.
+
+### SFTP: "… and this worker could not agree on a host key or a cipher. …" { #sftp-and-this-worker-could-not-agree-on-a-host-key-or-a-cipher }
+
+Prüfen Sie bei einem ersten Sync zuerst den Typ des Host-Keys. Der Worker fragt den
+Server nur nach einem Schlüssel des Typs in **Host key**, und Apache MINA SSHD
+antwortet so, wenn es keinen Schlüssel dieses Typs hat. Holen Sie den Schlüssel des
+Servers in einem anderen Typ, wie in [Schritt 1](#1-get-the-servers-host-key)
+beschrieben. Ist der Typ richtig, nimmt der Server keine der Ciphers an, die der
+Worker anbietet. Fragen Sie den Administrator, welche er zulässt. Ein Server, der
+nur komprimierte Verbindungen anbietet, liefert ebenfalls diesen Satz, weil der
+Worker Kompression nie einschaltet.
+
+### SFTP: "The connection to … was lost." { #sftp-the-connection-to-was-lost }
+
+Prüfen Sie bei einem ersten Sync zuerst den Typ des Host-Keys. OpenSSH und SFTPGo
+beenden die Verbindung so, wenn sie keinen Schlüssel des Typs in **Host key**
+haben.
+
+OpenSSH 9.8 und neuer lehnt außerdem jede Verbindung von einer Adresse ab, von der
+aus einige Logins fehlgeschlagen sind (`PerSourcePenalties`). Alle Quellen eines
+Deployments verbinden sich meist von einer einzigen Adresse aus, der Adresse der
+Worker. Eine Quelle mit falschem Passwort kann also die Syncs anderer Quellen auf
+demselben Server eine Zeit lang mit diesem Satz fehlschlagen lassen.
+
+Suchen Sie eine Quelle auf demselben Host, deren letzter Sync "The login to … did
+not complete." ergab. Korrigieren Sie ihren Login, oder halten Sie sie an.
+Synchronisieren Sie dann erneut, wenn die Sperre abgelaufen ist: Standardmäßig
+wächst sie auf höchstens 10 Minuten. Das Server-Log zeigt die Sperre als
+`srclimit_penalise`. Der Administrator des Servers kann die Adresse der Worker
+auch mit `PerSourcePenaltyExemptList` ausnehmen. Das hebt die Sperre für die
+Quellen jeder Organisation auf dem Deployment auf, korrigieren Sie also zuerst den
+Login.
+
+Andernfalls haben das Netzwerk oder der Server die Verbindung beendet oder
+zurückgesetzt oder die SFTP-Session beendet, oder der Server hat auf drei
+Keepalives nicht geantwortet. Eine Auflistung, die die Verbindung verliert, lässt den ganzen Sync fehlschlagen, und
+dieser Lauf entfernt nichts. Ein Download, der sie verliert, lässt diese Datei
+fehlschlagen, und die nächste Datei öffnet eine neue Verbindung.
+
+### SFTP: "… closed the connection." { #sftp-closed-the-connection }
+
+Prüfen Sie bei einem ersten Sync zuerst den Typ des Host-Keys. ProFTPD beendet die
+Verbindung so, wenn es keinen Schlüssel des Typs in **Host key** hat. Andernfalls
+hat der Server die Verbindung beim Aufbau beendet, etwa weil er keine weiteren
+Sessions zulässt oder die Adresse des Workers ablehnt. Das Worker-Log enthält den
+eigenen Grund des Servers.
+
+### SFTP: "The login to … as … did not complete. …" { #sftp-the-login-to-as-did-not-complete }
+
+Der Server hat den Benutzernamen, den Schlüssel oder das Passwort abgelehnt.
+Prüfen Sie sie im Vault. Prüfen Sie bei einem Schlüssel, ob der Administrator
+seine öffentliche Hälfte zu den `authorized_keys` des Kontos hinzugefügt hat. Ein
+Server, der ein Passwort nur über einen keyboard-interactive Login annimmt, lehnt
+einen Passwort-Login ab, verwenden Sie dort also einen Schlüssel. Ein Server kann
+auch den Typ des Schlüssels ablehnen. Apache MINA SSHD ohne seine EdDSA-Bibliothek
+lehnt einen Ed25519-Schlüssel ab, versuchen Sie dort also einen ECDSA-Schlüssel.
+Ein Server, der den Worker ohne Login hereinlässt, wird ebenfalls mit diesem Satz
+abgelehnt.
+
+Der Sync behält diese Ablehnung, sodass der Server einen fehlgeschlagenen Login
+erhält, nicht einen pro Datei. Jeder spätere Sync sendet einen weiteren. Unter
+OpenSSH 9.8 und neuer lassen einige davon den Server die Adresse der Worker eine
+Zeit lang ablehnen, und die anderen Quellen auf diesem Server schlagen dann mit
+[die Verbindung ging verloren](#sftp-the-connection-to-was-lost) fehl. Korrigieren
+Sie den Login, oder halten Sie die Quelle an.
+
+### SFTP: "The private key in the Vault could not be read with its passphrase." { #sftp-the-private-key-in-the-vault-could-not-be-read-with-its-passphrase }
+
+Der Worker konnte den privaten Schlüssel des Logins nicht mit der daneben
+gespeicherten Passphrase öffnen. Der Vault prüft den Schlüssel, wenn der Login
+gespeichert wird, also kommt das selten vor. Speichern Sie den Schlüssel und seine
+Passphrase erneut im Login.
+
+### SFTP: "… has no SFTP service for …" { #sftp-has-no-sftp-service-for }
+
+Der Server hat den Login angenommen, gibt dem Konto aber keinen SFTP-Dienst. Das
+Konto ist womöglich nur für eine Shell eingerichtet, oder der Server betreibt kein
+SFTP-Subsystem. Bitten Sie den Administrator, SFTP für das Konto zuzulassen.
+
+### SFTP: "… answered the start of the SFTP session in a way this worker cannot use." { #sftp-answered-the-start-of-the-sftp-session-in-a-way-this-worker-cannot-use }
+
+Der Server hat die Anfrage nach der SFTP-Version in einer Form beantwortet, die der
+Worker nicht verwenden kann, oder mit einer Antwort, die der Worker nicht
+dekodieren kann. Der Worker spricht SFTP Version 3, wie OpenSSH,
+SFTPGo, ProFTPD und Apache MINA SSHD. Das Worker-Log enthält die eigene Antwort des
+Servers. Fragen Sie den Administrator nach den SFTP-Einstellungen des Servers.
+
+### SFTP: "… did not answer within 30 seconds." { #sftp-did-not-answer-within-30-seconds }
+
+Der Server hat auf den Verbindungsaufbau oder auf eine SFTP-Anfrage nicht innerhalb
+von 30 Sekunden geantwortet. Beim Verbindungsaufbau ist die übliche Ursache eine
+Firewall, die die Pakete des Workers verwirft. Prüfen Sie, ob der Worker den
+SSH-Port des Servers erreichen kann. Während des Syncs hat der Server aufgehört zu
+antworten. Der Worker trennt die Verbindung, und die Auflistung oder diese Datei
+schlägt fehl. Die Auflistung liest mehrere Ordner gleichzeitig, sodass ein
+einziger Ordner, der hängt, die ganze Auflistung mit diesem Satz fehlschlagen
+lässt, und dieser Lauf entfernt nichts.
+
+### SFTP: "… could not be reached on port …" { #sftp-could-not-be-reached-on-port }
+
+Der Server hat die Verbindung auf diesem Port abgelehnt, oder das Netzwerk hat
+keine Route zu ihm. Prüfen Sie **Port**, und prüfen Sie, ob eine Firewall den
+Worker den Server erreichen lässt. Hat der Host mehr als eine Adresse, versucht der
+Worker jede davon, bevor er aufgibt.
+
+### SFTP: "The sync did not finish (OSError) - check the source's credential, …" { #sftp-the-sync-did-not-finish-oserror-check-the-sources-credential }
+
+Bei einer SFTP-Quelle ist das Credential meist nicht die Ursache. Dieser Satz
+bedeutet meist, dass der Worker als Benutzer ohne passwd-Eintrag läuft, sodass die
+SSH-Bibliothek den lokalen Benutzernamen des Workers nicht lesen kann. Setzen Sie
+`LOGNAME` für den Worker, wie im Hinweis "Ein Worker braucht einen lokalen
+Benutzernamen" unter [SFTP-Netzwerkregeln](#sftp-network-rules) beschrieben. Das
+Worker-Log enthält den vollständigen Fehler.
+
+### SFTP: "There is no folder … on …, or it is not a folder." { #sftp-there-is-no-folder-on-or-it-is-not-a-folder }
+
+**Folder** nennt keinen Ordner, den das Konto sehen kann. Prüfen Sie den Pfad. Auf
+einem Server, der das Konto auf einen Home-Ordner oder ein chroot beschränkt,
+beginnt der Pfad bei diesem Ordner, nicht bei der Wurzel des Servers. OpenSSH gibt
+dieselbe Antwort, wenn **Folder** eine Datei nennt. Andere Server antworten bei
+einer Datei mit "… could not list the folder …".
+
+### SFTP: "The account … may not read the folder … on …" { #sftp-the-account-may-not-read-the-folder-on }
+
+Das Konto hat keine Berechtigung, **Folder** aufzulisten. Bitten Sie den
+Administrator, dem Konto Lesezugriff auf den Ordner zu geben, oder wählen Sie einen
+Ordner, den das Konto lesen kann.
+
+### SFTP: "… could not list the folder …" { #sftp-could-not-list-the-folder }
+
+Der vollständige Satz lautet "… could not list the folder …. Check that it is a
+folder the account may read.". SFTPGo, ProFTPD und Apache MINA SSHD antworten so,
+wenn **Folder** eine Datei nennt, prüfen Sie also zuerst den Pfad. Andernfalls hat
+der Server die Auflistung aus einem anderen Grund nicht ausgeführt oder eine
+Antwort gesendet, die der Worker nicht dekodieren kann. Das Worker-Log enthält die
+eigene Antwort des Servers.
+
+### SFTP: "The listing of … stopped …. Choose a narrower folder." { #sftp-the-listing-of-stopped-choose-a-narrower-folder }
+
+Die Auflistung hat eine der [Grenzen](#what-bounds-an-sftp-sync) erreicht, und der
+Satz nennt, welche: 32 Ordnerebenen, 10000 Ordner, 1000000 Namen, 100000 Dateien,
+64 MB an Dateipfaden oder 1800 Sekunden. Was die Auflistung gefunden hat, ist aufgenommen, und nichts
+wurde entfernt. Eine Grenze lässt sich nicht anheben. Wählen Sie einen engeren
+**Folder** oder teilen Sie den Baum auf mehrere Quellen auf, bis ein Sync ohne
+diesen Satz endet.
+
+### SFTP: "The folder … could not be read." { #sftp-the-folder-could-not-be-read }
+
+Der übergeordnete Ordner listet diesen Ordner auf, aber der Server hat sich
+geweigert, ihn zu öffnen, meist weil das Konto keine Berechtigung hat, oder er hat
+dazu eine Antwort gesendet, die der Worker nicht dekodieren kann. Die anderen
+Ordner wurden aufgenommen, und in diesem Lauf wurde nichts entfernt. Geben Sie dem
+Konto Lesezugriff auf den Ordner, oder verschieben Sie den Ordner aus dem Baum.
+
+### SFTP: Namen, die in der Auflistung ausgelassen wurden { #sftp-names-left-out-of-the-listing }
+
+Das Sync-Protokoll kann für einen Ordner diese Sätze enthalten:
+
+- "The server listed … names in … that are not file names, so they were left
+  out." Die Namen sind leer, enthalten `/` oder ein NUL-Byte oder sind länger
+  als 255 Bytes, oder ihre Pfade sind länger als 4.096 Bytes.
+- "… names in … are not UTF-8, so those files were left out."
+- "The server did not say what … entries in … are, so they were left out."
+
+Benennen Sie bei den ersten beiden die Dateien auf dem Server um. Die Auflistung
+bleibt vollständig. Beim dritten hat der Server für einige Einträge keinen Typ
+angegeben. Die Auflistung ist dann unvollständig, also entfernt dieser Lauf
+nichts. Fragen Sie den Administrator nach dem Server. Das Sync-Protokoll zeigt
+höchstens drei Hinweise. Bringen Sie die genannten Ordner in Ordnung und
+synchronisieren Sie erneut, um die nächsten zu sehen. Ein Steuerzeichen im Namen
+eines Ordners oder ein Unicode-Zeilen- oder -Absatztrenner erscheint als `?`.
+
+### SFTP: eine als fehlgeschlagen gezählte Datei { #sftp-a-file-counted-as-failed }
+
+Das Sync-Protokoll zählt die Datei unter `failed`, und die anderen Dateien werden
+synchronisiert. Das Worker-Log nennt die Datei und den Grund, in einer Zeile wie
+`Failed to sync report.pdf: report.pdf is 61 MB, and a synced file may be at most 50 MB.`
+
+| Grund | Ursache | Was zu tun ist |
+|---|---|---|
+| "… is … MB, and a synced file may be at most … MB." | Die Datei ist größer als `MAX_UPLOAD_SIZE_MB`. Sie schlägt bei jedem Sync fehl, bevor ein Byte gelesen wird | Verschieben Sie die Datei aus dem Ordner, entfernen Sie ihren Typ aus **File types**, oder heben Sie `MAX_UPLOAD_SIZE_MB` an |
+| "The server sent more than … MB of …, and a synced file may be at most … MB." | Der Server hat mehr als die Grenze gesendet, obwohl seine Stat-Werte eine kleinere Größe angaben | Fragen Sie den Administrator nach der Datei |
+| "The account … may not read …" | Die Berechtigungen der Datei weisen das Konto ab | Geben Sie dem Konto Lesezugriff auf die Datei |
+| "The server refused to read …" | Der Server hat die Datei aus einem anderen Grund abgelehnt oder eine Antwort gesendet, die der Worker nicht dekodieren kann. Das Worker-Log enthält seine Antwort | Fragen Sie den Administrator |
+| "The server listed … as a file, and now says it is not one." | Der Pfad ist jetzt ein Ordner, ein Link oder eine Spezialdatei, oder die Antworten des Servers widersprechen sich | Die nächste Auflistung klärt es. Schlägt es bei jedem Sync fehl, fragen Sie den Administrator |
+| "The server lists …, but answers that it does not exist." | Der Ordner nennt die Datei noch, aber der Server antwortet für sie mit "no such file" | Fragen Sie den Administrator. Der Server widerspricht sich selbst |
+| "The server answers that … does not exist, and its folder could not be listed to confirm it." | Der Server hat mit "no such file" geantwortet und konnte danach den Ordner der Datei nicht auflisten, oder nicht innerhalb der 10 Minuten der Datei | Prüfen Sie die Berechtigungen des Ordners. Der nächste Sync versucht es erneut |
+| "The server sent … of the … bytes … holds." | Der Server hat weniger Bytes gesendet, als seine Stat-Werte angeben | Der nächste Sync versucht es erneut. Schlägt es wieder fehl, fragen Sie den Administrator |
+| "The server answered a read of … with more than was asked for." | Der Server hat mehr Bytes gesendet, als eine Anfrage verlangt hat | Fragen Sie den Administrator. Der Server ist defekt |
+| "The server opened a file for … that is not the file it listed. …" | Die geöffnete Datei hat einen anderen Besitzer oder eine andere Gruppe als die Auflistung, oder andere Berechtigungen als der Stat vor dem Öffnen oder, bei einer Datei, deren Größe oder Zeit sich verschoben hat, als die Auflistung | Siehe [ihren Eintrag](#sftp-the-server-opened-a-file-for-that-is-not-the-file-it-listed) |
+| "… did not download within 600 seconds." | Der Download hat länger als 10 Minuten gedauert. Eine Datei von 50 MB braucht etwa 85 KB/s | Prüfen Sie die Geschwindigkeit des Netzwerks zum Server |
+| "… did not answer within 30 seconds." oder "The connection to … was lost." | Der Server hat aufgehört zu antworten, oder die Verbindung endete während des Downloads | Die nächste Datei öffnet eine neue Verbindung, und der nächste Sync liest diese Datei |
+
+Wenn während des Syncs eine neue Verbindung fehlschlägt, behält der Sync diese
+Ablehnung. Jede Datei danach schlägt mit demselben Satz fehl. Siehe die Einträge
+zum Verbindungsaufbau weiter oben.
+
+### SFTP: "The server opened a file for … that is not the file it listed. …" { #sftp-the-server-opened-a-file-for-that-is-not-the-file-it-listed }
+
+Der vollständige Satz lautet "The server opened a file for … that is not the file
+it listed. Check that nobody can replace files in this folder with links.". Die
+Datei, die der Server geöffnet hat, hat einen anderen Besitzer oder eine andere
+Gruppe, als die Auflistung angab, oder andere Berechtigungen als der Stat direkt
+vor dem Öffnen. Gibt dieser Stat eine andere Größe oder Änderungszeit an als die
+Auflistung, müssen die Berechtigungen auch denen der Auflistung entsprechen. Die
+übliche Ursache ist ein Link anstelle der aufgelisteten Datei
+oder eines Ordners darüber, der den Sync eine andere Datei lesen lassen kann.
+
+Die Datei wird nicht aufgenommen. Siehe [die Warnung zu
+Links](#4-what-an-sftp-sync-transfers), und schließen Sie das Konto auf dem
+Server ein. Eine Datei, die ein anderes Konto zwischen der Auflistung und dem
+Download erneut hochgeladen hat, liefert diesen Satz einmal, und der nächste Sync
+liest sie. Ebenso eine Datei, die sich auf einem Server geändert hat, der die
+Berechtigungen in seiner Auflistung fälscht, etwa ProFTPD mit `DirFakeMode`.
+
+### SFTP: "… files changed or were deleted while this sync ran, …" { #sftp-files-changed-or-were-deleted-while-this-sync-ran }
+
+Diese Dateien haben sich während des Lesens geändert oder wurden nach der
+Auflistung gelöscht. Sie werden als `skipped` gezählt, und der nächste Sync liest
+sie oder entfernt ihre Dokumente. Der Connector protokolliert für jede Datei einen
+dieser Sätze, auf der Info-Ebene: "… changed while it was downloaded.", "… was
+replaced while it was downloaded." oder "… was deleted before it was downloaded."
+(oder "while it was downloaded."). Der mitgelieferte Worker gibt keine Info-Zeilen
+aus, sein Log zeigt sie also standardmäßig nicht. Zeigt dieselbe Datei das bei jedem Sync, ist
+eine mögliche Ursache ein Server, der die aktuelle Zeit als Änderungszeit der Datei
+meldet. Fragen Sie den Administrator nach dem Server.
 
 ### Geplante Syncs laufen nicht { #scheduled-syncs-are-not-running }
 

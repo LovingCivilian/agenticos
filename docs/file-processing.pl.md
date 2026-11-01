@@ -1,5 +1,5 @@
 ---
-source_sha: "54fd188fd445"
+source_sha: "bcc6b38e2737"
 ---
 
 # Przetwarzanie plików { #file-processing }
@@ -1166,8 +1166,9 @@ Rewizja to jedyne miejsce, w którym oba flow mogą dać różne odpowiedzi. Lok
 synchronizacja rozpoznaje niezmieniony plik wyłącznie po hashu, a to sprawdzenie
 jest dokładne. Dokładna rewizja, taka jak `ETag` z S3 albo sha bloba w Git, daje
 tę samą odpowiedź co hash. Rewizja, która może przeoczyć zmianę, taka jak rozmiar
-i czas modyfikacji, może sprawić, że `new_only` i `update_only` pominą rzadką
-edycję. Środkiem zaradczym jest `full`: pobiera i wciąga ponownie każdy plik.
+i czas modyfikacji, które serwer SFTP podaje dla pliku, może sprawić, że
+`new_only` i `update_only` pominą rzadką edycję. Środkiem zaradczym jest `full`:
+pobiera i wciąga ponownie każdy plik.
 Konektor, którego rewizja może przeoczyć zmianę, pisze o tym w swoim docstringu.
 
 Synchronizacja porównuje rewizję z listingu z rewizją zapisaną pod adresem,
@@ -1270,7 +1271,8 @@ poleceniu CLI `rag-sync-gdrive`, które operator uruchamia z własnej powłoki.
     operatora.
 
 To, co source wskazuje w `secret_id`, to `gcp_service_account` dla Drive, para
-`aws_credentials` dla S3 albo `git_token` dla repozytorium Git, deklarowane przez
+`aws_credentials` dla S3, `git_token` dla repozytorium Git, `entra_app` dla
+SharePoint albo login `ssh_credentials` dla serwera SFTP, deklarowane przez
 konektor jako `SECRET_KIND` i podawane kreatorowi jako `secret_kind` na listingu
 konektorów.
 
@@ -1291,8 +1293,10 @@ rzeczy:
   `InlineSecret` nie jest tu używany, bo obsługuje wyłącznie `api_key`, a konto
   serwisowe to wielopolowy formularz, którego uczciwym miejscem jest Vault.
 - **Serwis odrzuca konfigurację niosącą poświadczenie.** Na wysłanie starych nazw
-  pól odpowiada „poświadczenie nie trafia do konfiguracji source'a”, zamiast je
-  wyrzucać, przez co source zapisywał się, a potem nie umiał się uwierzytelnić.
+  pól albo pól `password`, `private_key` lub `passphrase` loginu SSH odpowiada
+  "a credential does not go in a source's configuration" („poświadczenie nie
+  trafia do konfiguracji source'a”), zamiast je wyrzucać, przez co source
+  zapisywał się, a potem nie umiał się uwierzytelnić.
 
 Odczyt dzieje się tam, gdzie jest sesja i tenant: worker odpieczętowuje sekret
 dla własnej organizacji source'a i podaje go konektorowi obok konfiguracji.
@@ -1485,7 +1489,9 @@ dokumentacja repozytorium gita
 i GCS, których warunek jest spełniony: `S3Connector` jest podklasą
 `ObjectStoreConnector`, więc każdy z nich to klient i `CONNECTOR_TYPE`, a nie
 druga kopia pętli listowania
-([#988](https://github.com/vstorm-co/agenticos/issues/988)).
+([#988](https://github.com/vstorm-co/agenticos/issues/988)). Drzewo folderów na
+serwerze SFTP czyta konektor `sftp` - zobacz [konfigurację
+SFTP](howto/configure-sync-sources.md#sftp-setup).
 
 Notion, Slack i archiwa poczty rozstrzygnięto na razie **przeciw**, każde z powodem zapisanym
 tam — dwa ostatnie dlatego, że rozmowa źle się wyszukuje, a integracje kanałów

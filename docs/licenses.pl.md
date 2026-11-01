@@ -1,5 +1,5 @@
 ---
-source_sha: "445f16218979"
+source_sha: "7f25591fa46d"
 ---
 
 # Licencje i noty stron trzecich { #licences-and-third-party-notices }
@@ -46,10 +46,17 @@ Niosą go dwa pliki, a skrypt pilnuje, żeby były uczciwe.
 **[`THIRD_PARTY_NOTICES.md`](https://github.com/vstorm-co/agenticos/blob/main/THIRD_PARTY_NOTICES.md)**
 jest generowany i commitowany. Dla każdej dystrybucji w którymkolwiek z obrazów
 zapisuje nazwę, wersję, wyrażenie licencyjne SPDX, URL źródła oraz dowód, z
-którego odczytano licencję: nagłówek `License-Expression`, klasyfikator, treść
-samego pliku licencji, indeks pakietów albo override zapisany przez człowieka.
-Wypisuje też najpierw otwarte ustalenia, liczbę komponentów na licencję oraz
-komponenty zapisane ręcznie.
+którego odczytano licencję: nagłówek `License-Expression`, pole `License`,
+klasyfikator, treść samego pliku licencji, indeks pakietów albo override zapisany
+przez człowieka. Wypisuje też najpierw otwarte ustalenia, liczbę komponentów na
+licencję oraz komponenty zapisane ręcznie.
+
+Pole `License`, które jest poprawnym wyrażeniem SPDX, skrypt czyta jako takie
+wyrażenie, przed klasyfikatorami i plikiem licencji. Wyrażenie zawierające
+przestarzały identyfikator SPDX, taki jak `GPL-2.0+` czy `LGPL-2.1`, albo `+` po
+identyfikatorze `-only` lub `-or-later`, nie jest przyjmowane, bo żaden zbiór
+w polityce nie wymienia tych identyfikatorów. Dla takiego pola skrypt czyta, tak
+jak wcześniej, znane zapisy pola, klasyfikatory i plik licencji.
 
 **`licenses/policy.toml`** trzyma decyzje. Wpis `override` to licencja, którą
 człowiek ustalił dla komponentu, którego metadane jej nie podają, wraz z dowodem,
@@ -108,7 +115,8 @@ not.
 | MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, MIT-0, MIT-CMU, Unlicense | około 400 | Zachować notę o prawach autorskich i tekst licencji przy kopiach | Plik licencji każdego pakietu jedzie w obrazie, obok kodu: każde `*.dist-info/` wheela w obrazie backendu, plik licencji każdego pakietu pod `/app/licenses/node_modules/<name>/` w obrazie frontendu. Noty je indeksują |
 | Apache-2.0 | około 90 | Tekst licencji, informacja o zmianach, każdy plik `NOTICE`, który niesie pakiet | Jak wyżej; nic nie jest modyfikowane, więc nie ma zmian, o których trzeba informować |
 | PSF-2.0, CNRI-Python, Zlib, CC0-1.0 | kilka | Atrybucja albo nic | Jak wyżej |
-| MPL-2.0 (`bidict`, `certifi`, `pathspec`, `tqdm`, część `orjson`) | 5 | Copyleft na poziomie plików: objęte pliki zostają na MPL, a ich źródła są dostępne | Używane bez modyfikacji; tekst licencji jedzie w obrazie; noty linkują źródła |
+| MPL-2.0 (`bidict`, `certifi`, `pathspec`, część `orjson`) oraz MPL-2.0 AND MIT (`tqdm`) | 5 | Copyleft na poziomie plików: objęte pliki zostają na MPL, a ich źródła są dostępne. Części `tqdm` na MIT zachowują swoją notę | Używane bez modyfikacji. Tekst licencji jedzie w obrazie, a jedyny plik licencji `tqdm` niesie oba teksty. Noty linkują źródła |
+| EPL-2.0 OR GPL-2.0-or-later (`asyncssh`) | 1 | Podwójna; wzięta na EPL-2.0 bez GPL jako Secondary License. Copyleft na poziomie plików: tekst licencji, noty w jego plikach i informacja, gdzie są jego źródła. Wdrożenie, które umieszcza go w komercyjnej ofercie produktu, przejmuje też wynikający z EPL obowiązek zwolnienia z odpowiedzialności (indemnity) za własne gwarancje (s.4) | Klient SSH connectora synchronizacji SFTP, który sprawdza też klucz loginu SSH w vault. Czysto pythonowy wheel importowany bez modyfikacji. Tekst EPL-2.0 jest w jego dist-info, jego pliki `.py` są jego źródłami z nienaruszonymi nagłówkami, a noty linkują źródła. Jego copyleft obejmuje tylko zmodyfikowane pliki asyncssh, więc licencja samego AgenticOS się nie zmienia |
 | LGPL-3.0-or-later (`psycopg2-binary`, `@img/sharp-libvips-linux-*`) | 3 | Tekst licencji, dostępność źródeł i możliwość podmiany biblioteki | Oba to osobno instalowane binaria ładowane dynamicznie, bez modyfikacji, wymienialne przez reinstalację; źródła zalinkowane w notach. Pakiety libvips nie publikują pliku licencji, więc obraz kładzie tekst LGPL obok nich |
 | LGPL-3.0-only (`ldap3`) | 1 | Tekst licencji, dostępność źródeł i możliwość podmiany biblioteki | Klient LDAP logowania katalogowego, czysto pythonowy wheel importowany bez modyfikacji i wymienialny przez reinstalację; jego pliki licencji są w jego dist-info, a źródła zalinkowane w notach |
 | Artistic-1.0-Perl albo GPL-2.0-or-later (`text-unidecode`) | 1 | Podwójna; wzięta na Artistic License: nota i tekst | Plik licencji z wheela jedzie w obrazie |

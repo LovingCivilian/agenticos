@@ -20,7 +20,7 @@ Maintained by the AgenticOS team. Sources checked 14 October 2026. AgenticOS bas
 | Where it runs | Locally, in your cloud or in OpenAI's | Your infrastructure, with Docker Compose |
 | Source | Proprietary | Apache-2.0 |
 | Models | OpenAI | 28 providers, including local models |
-| Company context | Connected to CRMs and data warehouses | Knowledge bases synced from Drive, S3, SharePoint, OneDrive, websites and git; 4,700+ MCP servers |
+| Company context | Connected to CRMs and data warehouses | Knowledge bases synced from Drive, S3, SharePoint, OneDrive, websites, git and SFTP servers; 4,700+ MCP servers |
 | Governance | Per-agent permissions, evaluations, dashboards | Roles and per-resource grants, approvals, budgets checked before each model request, a tamper-evident audit log |
 | Pricing | Not published | No licence fee; you pay model providers and infrastructure |
 

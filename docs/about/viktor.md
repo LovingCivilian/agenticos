@@ -20,7 +20,7 @@ Maintained by the AgenticOS team. Sources checked 21 October 2026. AgenticOS bas
 | Where it runs | Viktor's cloud, US-hosted by default | Your infrastructure, with Docker Compose |
 | Source | Proprietary | Apache-2.0 |
 | Models | OpenAI, Anthropic, Google and xAI models in a picker; your own OpenRouter key | 28 providers, including Ollama and LiteLLM on your own hardware |
-| Knowledge | Workspace memory and connected tools | Document collections in your Postgres, with five sync connectors |
+| Knowledge | Workspace memory and connected tools | Document collections in your Postgres, with six sync connectors |
 | Surfaces | Slack, Teams, Discord, its own email inbox, web, desktop and mobile apps, API | Web chat, widget, hosted page, HTTP API, WebSocket, Slack, Telegram, Mattermost |
 | Access | Workspace level; its pages differ on role-based access | Six roles, 33 permissions and per-resource grants, per organization |
 | Spend control | The credit pool with a monthly cap on auto top-ups; per-user caps on Enterprise | A monthly budget per agent and per organization, checked before each model request |
@@ -51,7 +51,7 @@ Viktor is hosted in the US. Its pages differ on EU residency and configurable re
 
 ### Knowledge you can inspect
 
-Viktor learns from conversations and connected tools. AgenticOS adds managed document collections: you choose the [parser](../file-processing.md#parser-selection-rag) and [chunking](../file-processing.md#chunking-configuration) per collection. You can sync from Google Drive, S3, SharePoint or OneDrive, a website or a git repository. A sync [removes documents](../howto/configure-sync-sources.md#what-a-sync-removes) the source no longer lists.
+Viktor learns from conversations and connected tools. AgenticOS adds managed document collections: you choose the [parser](../file-processing.md#parser-selection-rag) and [chunking](../file-processing.md#chunking-configuration) per collection. You can sync from Google Drive, S3, SharePoint or OneDrive, a website, a git repository or a folder on an SFTP server. A sync [removes documents](../howto/configure-sync-sources.md#what-a-sync-removes) the source no longer lists.
 
 ## When Viktor is enough
 

@@ -1,5 +1,5 @@
 ---
-source_sha: "90d9185a9978"
+source_sha: "d8b0ea3eec72"
 ---
 
 # Sekrety i vault { #secrets-and-the-vault }
@@ -97,6 +97,7 @@ kończy z poświadczeniem, które zawodzi przy pierwszym runie. Sekret ma więc
 | `gcp_service_account` | JSON konta serwisowego, walidowany przy wprowadzaniu |
 | `github_oauth_app` | Publiczny client id aplikacji GitHub OAuth App i jej sekret |
 | `git_token` | Token dostępu do git przez HTTPS i jedyny host, do którego wolno go wysłać |
+| `ssh_credentials` | Nazwa użytkownika z kluczem prywatnym albo hasłem, dla serwera SFTP, i jedyny host, z którym wolno jej użyć |
 | `entra_app` | Tenant id, client id i client secret rejestracji aplikacji Microsoft Entra |
 | `openai_codex` | Logowanie do ChatGPT: token dostępu, refresh token i id konta |
 | `none` | Nie jest sekretem — znacznik endpointu, który nie potrzebuje poświadczenia |
@@ -127,6 +128,53 @@ API OpenAI do funkcji głosowych. Lista nigdy nie zmienia automatycznie dostępu
 URL wybrany przez tego, kto edytuje źródło. Związany z hostem, z którym został
 dodany, token nie może zostać skierowany na inny serwer przez edycję źródła
 i żaden inny klucz nie może go zastąpić.
+
+`ssh_credentials` to login SSH, którym źródło synchronizacji SFTP czyta folder.
+Niesie swój host z tego samego powodu: ten, kto edytuje źródło, wpisuje adres
+serwera, a connector wysyła login wyłącznie do hosta i portu, dla których został
+dodany. Login dodany bez portu jest używany tylko na porcie 22. Host jest
+zapisywany tak, jak zapisuje go źródło - małymi literami, w kodowaniu IDNA, adres
+IPv6 w postaci skróconej, bez kropki na końcu - więc jeden host nie może przestać
+pasować dlatego, że wpisano go inaczej. W odróżnieniu od hosta `git_token` może
+zawierać podkreślenie, na przykład `sftp_server`.
+
+Login zawiera klucz prywatny, z hasłem klucza (passphrase), jeśli klucz jest
+zaszyfrowany, albo hasło (password), nigdy oba naraz. Klucz jest sprawdzany przy
+wprowadzaniu, w dwóch krokach:
+
+- **To, co nic nie kosztuje,** działa przy każdym parsowaniu loginu, także za
+  każdym razem, gdy vault go otwiera. Klucz może mieć najwyżej 16 384 znaki,
+  a hasło klucza albo hasło najwyżej 1024, więc nic dłuższego nie jest
+  dekodowane. Wklejona treść musi być blokiem klucza prywatnego, który odczytuje biblioteka SSH, zaszyfrowany klucz wymaga hasła
+  klucza, a współczynnik pracy samego klucza może wynosić najwyżej 128 rund bcrypt
+  (OpenSSH) albo 1 000 000 iteracji i 64-bajtowy klucz pochodny (PKCS#8).
+  Współczynnik pracy jest odczytywany z nagłówka klucza, bez odszyfrowania
+  klucza.
+- **Otwarcie klucza** hasłem klucza następuje tylko przy zapisie loginu, gdy
+  wywołujący ma już prawo go zapisać. Działa w krótko żyjącym procesie potomnym,
+  który nie importuje niczego z aplikacji i dostaje klucz na swoje standardowe
+  wejście. Proces potomny może działać 5 sekund, a potem jest zabijany. W każdym
+  procesie API działają naraz najwyżej dwa, a zapis, który zastanie oba zajęte,
+  jest od razu odrzucany ze statusem 503.
+
+Proces potomny odrzuca klucz RSA dłuższy niż 4096 bitów albo taki, którego dwie
+liczby pierwsze różnią się rozmiarem o więcej niż 16 bitów, bez sprawdzania jego
+liczb, bo to sprawdzenie szybko rośnie wraz z rozmiarem każdej liczby pierwszej.
+Odrzuca też klucz przechowywany na kluczu sprzętowym (`sk-`): worker nie ma
+klucza sprzętowego, którym mógłby podpisywać.
+
+Proces potomny jest potrzebny, bo kosztowne liczby zaszyfrowanego klucza są
+w części, którą pokazuje dopiero odszyfrowanie, a klucz RSA jest sprawdzany przy
+trzymanej blokadzie interpretera Pythona, więc wątek nie utrzyma tej pracy poza
+pętlą zdarzeń. Klucz, którego nie da się otworzyć, zostaje więc odrzucony, gdy
+formularz jest jeszcze otwarty, a nie przy pierwszej synchronizacji, i tylko
+wywołujący, który może zapisać login, może sprawić, że serwer otworzy klucz.
+Worker otwiera klucz ponownie raz w każdej synchronizacji, co kosztuje nie więcej,
+niż pozwoliło sprawdzenie.
+
+Podpowiedź (hint) loginu to ostatnie cztery znaki nazwy użytkownika, która nie
+jest tajna. Cztery znaki klucza byłyby jego obramowaniem PEM. Zobacz [Konfiguracja
+SFTP](howto/configure-sync-sources.md#sftp-setup).
 
 `entra_app` to to, jako co loguje się źródło synchronizacji SharePoint albo
 OneDrive. Jego zasięg ustala się w Microsoft Entra, nie tutaj: o tym, które
